@@ -1,6 +1,6 @@
-# pipackage
+# Self-pi
 
-Personal Pi package monorepo.
+Personal Pi package monorepo (`pipackage`).
 
 ## Packages
 
@@ -10,6 +10,12 @@ Personal Pi package monorepo.
 
 ```bash
 cd package/pi-coding-workflow
+npm test
+```
+
+Or from repository root:
+
+```bash
 npm test
 ```
 
