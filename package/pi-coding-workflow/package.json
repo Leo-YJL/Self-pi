@@ -1,0 +1,24 @@
+{
+  "name": "pi-coding-workflow",
+  "version": "0.1.0",
+  "description": "Generic coding workflow package for Pi with workflow_next/workflow_run tools and plan-based init-spec.",
+  "keywords": ["pi-package", "pi-extension", "workflow", "coding-agent", "unity"],
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "skills": ["./skills"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "smoke:unity-scanner": "node --experimental-strip-types -e \"import('./src/init/unityScanner.ts').then(()=>console.log('unity scanner import ok'))\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}
