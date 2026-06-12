@@ -83,7 +83,7 @@ interface ReplayReport {
   results: ReplayResult[];
 }
 
-const DEFAULT_SOURCE = "D:/YJL_AI/GameBase";
+const DEFAULT_SOURCE = ".";
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
