@@ -1,49 +1,66 @@
 import { existsSync } from "node:fs";
-import type { WorkflowNextInput, WorkflowNextOutput } from "../types.ts";
+import type { DetailMode, WorkflowContextSummary, WorkflowNextInput, WorkflowNextOutput, WorkflowOmittedArtifact, WorkflowResultMeta } from "../types.ts";
 import { readConfig } from "./config.ts";
 import { findActiveTask, readTask, type WorkflowTaskJson } from "./task.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
+import { buildContextBundle, type WorkflowContextBundle } from "./contextBundle.ts";
+import { contextBudgetPolicy, estimateTokens, omitted, tokenBudget, truncateText } from "./contextBudget.ts";
+import { computeWorkflowNextCacheKey, readWorkflowNextCache, writeWorkflowNextCache } from "./cache.ts";
+import { writeWorkflowTelemetry } from "./telemetry.ts";
 
 export async function workflowNext(root: string, input: WorkflowNextInput = {}): Promise<WorkflowNextOutput> {
+  const startedAt = Date.now();
   const config = await readConfig(root);
   const hasWorkflow = existsSync(resolveInsideRoot(root, ".workflow"));
-  const includeContext = input.includeContext ?? "brief";
+  const includeContext = input.includeContext ?? "lite";
   const requestedTask = input.task ? await readTask(root, input.task) : null;
   const activeTask = requestedTask ?? await findActiveTask(root);
+  let output: WorkflowNextOutput;
 
   if (!hasWorkflow) {
-    return {
+    output = finalizeNext({
       ok: true,
       status: "no_task",
       nextAction: "ask_user",
       recommendedTool: { name: "workflow_run", arguments: { action: "checkpoint", mode: "dry_run" } },
       blockedBy: [],
       warnings: [{ code: "workflow_dir_missing", message: "No .workflow directory found. Run /workflow-init first." }],
-      context: includeContext === "none" ? undefined : { mode: includeContext, summary: "Workflow not initialized." },
-      cache: { cacheFriendly: true },
-    };
-  }
-
-  if (!activeTask) {
-    return {
+      context: includeContext === "none" ? undefined : emptyContext(includeContext, "Workflow not initialized.", ["workflow:init"], input.detail),
+      cache: { stableKey: "workflow-next:v2:no-workflow", cacheFriendly: true, hit: false },
+    }, startedAt);
+  } else if (!activeTask) {
+    output = finalizeNext({
       ok: true,
       status: "no_task",
       nextAction: "no_task_grill",
       recommendedTool: { name: "workflow_run", arguments: { action: "create_from_grill", mode: "dry_run", profile: config?.project.profile ?? "generic" } },
       blockedBy: [],
       warnings: config ? [] : [{ code: "workflow_config_missing", message: "No .workflow/config.json found. Run /workflow-init first." }],
-      context: includeContext === "none" ? undefined : { mode: includeContext, summary: config ? `Workflow profile: ${config.project.profile}; no active task.` : "Workflow not initialized." },
-      cache: { cacheFriendly: true },
-    };
+      context: includeContext === "none" ? undefined : emptyContext(includeContext, config ? `Workflow profile: ${config.project.profile}; no active task.` : "Workflow not initialized.", ["workflow:config", "tasks:active:none"], input.detail),
+      cache: { stableKey: "workflow-next:v2:no-task", cacheFriendly: true, hit: false },
+    }, startedAt);
+  } else {
+    output = finalizeNext(await routeForTask(root, config?.project.profile ?? "generic", activeTask, input), startedAt);
   }
 
-  return routeForTask(config?.project.profile ?? "generic", activeTask, input);
+  await writeWorkflowTelemetry(root, "workflow_next", output);
+  return output;
 }
 
-function routeForTask(profile: string, task: WorkflowTaskJson, input: WorkflowNextInput): WorkflowNextOutput {
-  const includeContext = input.includeContext ?? "brief";
+async function routeForTask(root: string, profile: string, task: WorkflowTaskJson, input: WorkflowNextInput): Promise<WorkflowNextOutput> {
+  const includeContext = input.includeContext ?? "lite";
   const next = nextActionForTask(task, input.agent);
-  return {
+  const workflowCacheKey = isWorkflowNextCacheable(includeContext, input.detail)
+    ? await computeWorkflowNextCacheKey(root, task, { profile, includeContext, detail: input.detail, agent: input.agent })
+    : undefined;
+  if (workflowCacheKey) {
+    const cached = await readWorkflowNextCache(root, workflowCacheKey);
+    if (cached) return cached;
+  }
+
+  const bundle = includeContext === "none" ? null : await buildContextBundle(root, task, { mode: includeContext, agent: input.agent, profile, detail: input.detail });
+  const context = bundle ? contextFromBundle(bundle, input.detail) : undefined;
+  const output: WorkflowNextOutput = {
     ok: true,
     status: task.status,
     task: task.id,
@@ -51,10 +68,175 @@ function routeForTask(profile: string, task: WorkflowTaskJson, input: WorkflowNe
     flowLevel: task.flowLevel,
     nextAction: next.nextAction,
     recommendedTool: next.recommendedTool,
-    blockedBy: [],
-    warnings: [],
-    context: includeContext === "none" ? undefined : { mode: includeContext, summary: `Workflow profile: ${profile}; active task ${task.id}; status=${task.status}; stage=${task.stage}; flow=${task.flowLevel}.` },
-    cache: { cacheFriendly: true, taskKey: `${task.id}:${task.status}:${task.stage}:${task.flowLevel}` },
+    blockedBy: bundle?.blockedBy ?? [],
+    warnings: bundle?.warnings ?? [],
+    context,
+    evidenceRefs: context?.evidenceRefs,
+    omitted: context?.omitted,
+    tokenBudget: context?.tokenBudget,
+    cache: {
+      stableKey: "workflow-next:v2",
+      cacheFriendly: true,
+      hit: false,
+      taskKey: `${task.id}:${task.status}:${task.stage}:${task.flowLevel}`,
+      dynamicKey: bundle?.prd.source.hash ? `${bundle.prd.source.hash}:${bundle.manifests.implement.hash ?? ""}:${bundle.manifests.check.hash ?? ""}` : undefined,
+      cacheKey: workflowCacheKey ?? (bundle?.prd.source.hash ? `${task.id}:${task.status}:${task.stage}:${includeContext}:${input.detail ?? "summary"}:${bundle.prd.source.hash}:${bundle.manifests.implement.hash ?? ""}:${bundle.manifests.check.hash ?? ""}` : undefined),
+    },
+  };
+  if (workflowCacheKey) await writeWorkflowNextCache(root, workflowCacheKey, output);
+  return output;
+}
+
+function isWorkflowNextCacheable(includeContext: WorkflowNextInput["includeContext"], detail: WorkflowNextInput["detail"]): boolean {
+  if (!includeContext || includeContext === "lite" || includeContext === "brief") return detail !== "full" && detail !== "normal";
+  return false;
+}
+
+function emptyContext(mode: WorkflowContextSummary["mode"], summaryText: string, evidenceRefs: string[], detail: DetailMode = "summary"): WorkflowContextSummary {
+  const policy = contextBudgetPolicy(mode, detail);
+  const truncated = truncateText(summaryText, policy.maxSummaryChars || summaryText.length);
+  const context = { mode, summary: truncated.text, evidenceRefs };
+  return {
+    ...context,
+    omitted: [],
+    tokenBudget: tokenBudget(context, policy.maxRecommendedTokens, { truncatedBytes: truncated.truncatedBytes, omitted: [] }),
+  };
+}
+
+function contextFromBundle(bundle: WorkflowContextBundle, detail: DetailMode = "summary"): WorkflowContextSummary {
+  const policy = contextBudgetPolicy(bundle.mode, detail);
+  const evidenceRefs = evidenceRefsFor(bundle);
+  const omittedItems: WorkflowOmittedArtifact[] = [];
+  const truncatedSummary = truncateText(bundle.summary, policy.maxSummaryChars || bundle.summary.length);
+  let truncatedBytes = truncatedSummary.truncatedBytes;
+  let details: unknown;
+
+  if (policy.includeDetails) {
+    details = detailedContext(bundle);
+    const detailsTokens = estimateTokens(details);
+    if (detailsTokens > policy.maxRecommendedTokens) {
+      omittedItems.push(omitted("context.details", "workflow_next.details", details, `Details exceeded ${policy.maxRecommendedTokens} token budget; returning brief details.`));
+      details = briefDetails(bundle);
+    }
+  } else {
+    omittedItems.push(omitted("context.details", "workflow_next.details", detailedContext(bundle), `${bundle.mode} mode returns evidence refs instead of full details.`));
+  }
+
+  const valueForBudget = { summary: truncatedSummary.text, evidenceRefs, details };
+  return {
+    mode: bundle.mode,
+    summary: truncatedSummary.text,
+    prdHash: bundle.prd.source.hash,
+    evidenceRefs,
+    omitted: omittedItems,
+    tokenBudget: tokenBudget(valueForBudget, policy.maxRecommendedTokens, { truncatedBytes, omitted: omittedItems }),
+    details,
+  };
+}
+
+function detailedContext(bundle: WorkflowContextBundle): unknown {
+  return {
+    task: bundle.task,
+    prd: bundle.prd,
+    manifests: {
+      implement: compactManifest(bundle.manifests.implement),
+      check: compactManifest(bundle.manifests.check),
+    },
+    workspace: bundle.workspace,
+    recommendedNext: bundle.recommendedNext,
+  };
+}
+
+function briefDetails(bundle: WorkflowContextBundle): unknown {
+  return {
+    task: bundle.task,
+    prd: {
+      title: bundle.prd.title,
+      source: bundle.prd.source,
+      openQuestions: bundle.prd.openQuestions,
+      finalConfirmation: bundle.prd.finalConfirmation,
+      quality: bundle.prd.quality,
+      summary: bundle.prd.summary,
+    },
+    manifests: {
+      implement: manifestBrief(bundle.manifests.implement),
+      check: manifestBrief(bundle.manifests.check),
+    },
+    workspace: {
+      isGit: bundle.workspace.isGit,
+      dirtyCount: bundle.workspace.dirtyCount,
+      inScopeCount: bundle.workspace.inScopeCount,
+      taskFileCount: bundle.workspace.taskFileCount,
+      unrelatedCount: bundle.workspace.unrelatedCount,
+      summary: bundle.workspace.summary,
+    },
+    recommendedNext: bundle.recommendedNext,
+  };
+}
+
+function compactManifest(manifest: WorkflowContextBundle["manifests"]["implement"]): unknown {
+  return {
+    agent: manifest.agent,
+    path: manifest.path,
+    exists: manifest.exists,
+    hash: manifest.hash,
+    entries: manifest.entries,
+    missingFiles: manifest.missingFiles,
+    issues: manifest.issues,
+    summary: manifest.summary,
+  };
+}
+
+function manifestBrief(manifest: WorkflowContextBundle["manifests"]["implement"]): unknown {
+  return {
+    agent: manifest.agent,
+    path: manifest.path,
+    exists: manifest.exists,
+    hash: manifest.hash,
+    entryCount: manifest.entries.length,
+    missingCount: manifest.missingFiles.length,
+    issueCount: manifest.issues.length,
+    summary: manifest.summary,
+  };
+}
+
+function evidenceRefsFor(bundle: WorkflowContextBundle): string[] {
+  const refs = [
+    `task:${bundle.task.id}`,
+    `prd:${bundle.prd.source.hash ?? "missing"}`,
+    `manifest:implement:${bundle.manifests.implement.hash ?? "missing"}`,
+    `manifest:check:${bundle.manifests.check.hash ?? "missing"}`,
+    "workspace:git-status",
+  ];
+  if (bundle.blockedBy.length > 0) refs.push(...bundle.blockedBy.slice(0, 6).map((blocker) => `blocker:${blocker.code}`));
+  return refs;
+}
+
+function finalizeNext(output: WorkflowNextOutput, startedAt: number): WorkflowNextOutput {
+  const omittedRefs = output.omitted?.map((item) => item.ref) ?? output.context?.omitted?.map((item) => item.ref) ?? [];
+  const truncatedBytes = output.tokenBudget?.truncatedBytes ?? output.context?.tokenBudget?.truncatedBytes ?? 0;
+  const estimatedTokens = output.tokenBudget?.estimatedInput ?? output.context?.tokenBudget?.estimatedInput ?? estimateTokens({
+    status: output.status,
+    task: output.task,
+    nextAction: output.nextAction,
+    blockedBy: output.blockedBy,
+    warnings: output.warnings,
+  });
+  const meta: WorkflowResultMeta = {
+    estimatedTokens,
+    targetTokens: output.context?.tokenBudget?.maxRecommended,
+    maxRecommendedTokens: output.context?.tokenBudget?.maxRecommended,
+    truncatedBytes,
+    omittedRefs,
+    durationMs: Date.now() - startedAt,
+    cacheHit: output.cache?.hit ?? output.context?.tokenBudget?.cacheHit ?? false,
+  };
+  return {
+    ...output,
+    evidenceRefs: output.evidenceRefs ?? output.context?.evidenceRefs,
+    omitted: output.omitted ?? output.context?.omitted,
+    tokenBudget: output.tokenBudget ?? output.context?.tokenBudget,
+    meta,
   };
 }
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseUnityVersion, scanUnityProject } from "../src/init/unityScanner.ts";
@@ -12,6 +12,10 @@ import { resolveInsideRoot } from "../src/safety/pathPolicy.ts";
 import { writeJsonArtifact } from "../src/artifacts/writeToolResult.ts";
 import { workflowNext } from "../src/engine/route.ts";
 import { workflowRun } from "../src/engine/run.ts";
+import { readPrdKernel } from "../src/engine/prd.ts";
+import { readManifest } from "../src/engine/manifest.ts";
+import { confirmPrdFinal } from "../src/engine/prdConfirm.ts";
+import { buildWorkflowCompactionSummary } from "../src/engine/compaction.ts";
 
 async function fakeUnityProject() {
   const root = await mkdtemp(join(tmpdir(), "pcw-unity-"));
@@ -25,6 +29,76 @@ async function fakeUnityProject() {
   await writeFile(join(root, "Assets/Scripts/Bootstrap/GameBootstrap.cs"), "class GameBootstrap { void Start() { DontDestroyOnLoad(this); } }\n", "utf8");
   await writeFile(join(root, "Assets/Scripts/Game.Runtime.asmdef"), JSON.stringify({ name: "Game.Runtime", references: [] }), "utf8");
   return root;
+}
+
+function prdMarkdown(title: string, options: { todo?: boolean; openQuestions?: string; finalConfirmed?: boolean; finishComplete?: boolean } = {}): string {
+  const todo = options.todo ? "TODO" : "Deliver the requested package workflow slice.";
+  const openQuestions = options.openQuestions ?? "None.";
+  const finalConfirmed = options.finalConfirmed ?? true;
+  const checked = options.finishComplete ? "x" : " ";
+  return `# ${title}
+
+## Execution Contract
+- Flow Level: complex
+- Outcome: ${todo}
+- Final Confirmation: ${finalConfirmed ? "confirmed" : "pending"}
+
+## Goal
+Ship deterministic workflow package preflight behavior.
+
+## Requirements
+- R1: Parse PRD kernel.
+- R2: Validate manifests.
+
+## Acceptance Criteria
+- [${checked}] PRD gates are enforced.
+- [${checked}] Manifest files are validated.
+
+## Validation Plan
+- [${checked}] npm test
+
+## Definition of Done
+- [${checked}] Implementation matches this PRD.
+
+## Open Questions
+${openQuestions}
+
+## Out of Scope
+- Git finalizer execution.
+
+## Final Confirmation Before Implementation
+- Status: ${finalConfirmed ? "confirmed" : "pending"}
+`;
+}
+
+async function seedManifestFiles(root: string) {
+  await mkdir(join(root, "src"), { recursive: true });
+  await mkdir(join(root, "tests"), { recursive: true });
+  await writeFile(join(root, "src/main.ts"), "export const ok = true;\n", "utf8");
+  await writeFile(join(root, "tests/main.test.ts"), "export const checked = true;\n", "utf8");
+}
+
+async function seedTaskPreflight(root: string, taskId: string, options: Parameters<typeof prdMarkdown>[1] = {}) {
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", taskId);
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Ready Task", options), "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+}
+
+function blockerCodes(result: { blockedBy: Array<{ code: string }> }): string[] {
+  return result.blockedBy.map((blocker) => blocker.code);
+}
+
+async function readTelemetryEvents(root: string): Promise<any[]> {
+  const dir = join(root, ".workflow/.runtime/telemetry");
+  const files = await readdir(dir);
+  const events: any[] = [];
+  for (const file of files.filter((name) => name.endsWith(".jsonl")).sort()) {
+    const text = await readFile(join(dir, file), "utf8");
+    events.push(...text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)));
+  }
+  return events;
 }
 
 test("config schema validates default config", () => {
@@ -100,7 +174,13 @@ test("workflow_next detects active planning and in-progress tasks", async () => 
   assert.equal(next.stage, "grill");
   assert.equal(next.flowLevel, "complex");
   assert.equal(next.nextAction, "start_checked");
+  assert.ok(blockerCodes(next).includes("prd_todo_present"));
 
+  const blockedStartDryRun = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(blockedStartDryRun.ok, false);
+  assert.ok(blockerCodes(blockedStartDryRun).includes("prd_todo_present"));
+
+  await seedTaskPreflight(root, create.task!, { finishComplete: false });
   const startDryRun = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(startDryRun.ok, true);
   assert.equal(startDryRun.mutated, false);
@@ -116,4 +196,223 @@ test("workflow_next detects active planning and in-progress tasks", async () => 
 
   const finishRoute = await workflowNext(root, { agent: "finish", includeContext: "brief" });
   assert.equal(finishRoute.nextAction, "finish_dry_run");
+});
+
+
+test("PRD kernel, manifest helpers and workflow_next task context summarize P1 state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-p1-context-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "P1 Context", level: "complex", slug: "p1-context" });
+  await seedTaskPreflight(root, create.task!, { finishComplete: true });
+
+  const kernel = await readPrdKernel(root, { id: create.task!, title: "P1 Context", status: "planning", stage: "grill", flowLevel: "complex", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, "brief");
+  assert.equal(kernel.source.exists, true);
+  assert.equal(kernel.finalConfirmation.confirmed, true);
+  assert.equal(kernel.openQuestions.blocking, false);
+  assert.equal(kernel.sections.acceptanceCriteria.checklist.total, 2);
+
+  const manifest = await readManifest(root, { id: create.task!, title: "P1 Context", status: "planning", stage: "grill", flowLevel: "complex", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, "implement");
+  assert.equal(manifest.entries.length, 1);
+  assert.equal(manifest.issues.length, 0);
+
+  const next = await workflowNext(root, { task: create.task, includeContext: "task" });
+  assert.equal(next.status, "planning");
+  assert.deepEqual(next.blockedBy, []);
+  const details = next.context?.details as any;
+  assert.equal(details.prd.finalConfirmation.confirmed, true);
+  assert.equal(details.manifests.implement.entries[0].file, "src/main.ts");
+});
+
+test("workflow_next defaults to lite context with budget metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-lite-context-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Lite Context", level: "complex", slug: "lite-context" });
+  await seedTaskPreflight(root, create.task!, { finishComplete: true });
+
+  const next = await workflowNext(root, {});
+  assert.equal(next.context?.mode, "lite");
+  assert.equal(next.context?.details, undefined);
+  assert.ok(next.context?.evidenceRefs?.some((ref) => ref.startsWith("prd:")));
+  assert.ok(next.context?.omitted?.some((item) => item.kind === "context.details"));
+  assert.ok((next.context?.tokenBudget?.estimatedInput ?? 0) <= (next.context?.tokenBudget?.maxRecommended ?? 0));
+  assert.equal(next.meta?.cacheHit, false);
+
+  const cached = await workflowNext(root, {});
+  assert.equal(cached.cache?.hit, true);
+  assert.equal(cached.context?.tokenBudget?.cacheHit, true);
+  assert.equal(cached.meta?.cacheHit, true);
+});
+
+test("workflow-prd-confirm engine records final confirmation without LLM", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-prd-confirm-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Confirm PRD", level: "complex", slug: "confirm-prd" });
+  await seedTaskPreflight(root, create.task!, { finalConfirmed: false, finishComplete: true });
+
+  const blockedStart = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.ok(blockerCodes(blockedStart).includes("prd_final_confirmation_missing"));
+
+  const dryRun = await confirmPrdFinal(root, { task: create.task, mode: "dry_run", message: "User approved implementation." });
+  assert.equal(dryRun.ok, true);
+  assert.equal(dryRun.mutated, false);
+  assert.match(dryRun.preview ?? "", /Status: confirmed/);
+
+  const executed = await confirmPrdFinal(root, { task: create.task, mode: "execute", message: "User approved implementation." });
+  assert.equal(executed.ok, true);
+  assert.equal(executed.mutated, true);
+
+  const kernel = await readPrdKernel(root, { id: create.task!, title: "Confirm PRD", status: "planning", stage: "grill", flowLevel: "complex", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, "compact");
+  assert.equal(kernel.finalConfirmation.confirmed, true);
+
+  const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(start.ok, true);
+});
+
+test("workflow_run batch returns envelope metadata and next recommendation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-batch-"));
+  await executeInitWorkspace(root, "generic");
+
+  const result = await workflowRun(root, {
+    action: "batch",
+    mode: "dry_run",
+    actions: [
+      { action: "create_from_grill", title: "Batch Task", level: "standard", slug: "batch-task" },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.action, "batch");
+  assert.equal(result.results?.length, 1);
+  assert.equal(result.results?.[0].action, "create_from_grill");
+  assert.equal(result.nextRecommendedCall?.name, "workflow_next");
+  assert.ok((result.meta?.estimatedTokens ?? 0) > 0);
+});
+
+test("workflow_run execute batch records transaction artifact and rollback hints", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-batch-exec-"));
+  await executeInitWorkspace(root, "generic");
+
+  const result = await workflowRun(root, {
+    action: "batch",
+    mode: "execute",
+    actions: [
+      { action: "create_from_grill", title: "Batch Execute", level: "standard", slug: "batch-execute" },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.mutated, true);
+  assert.equal(result.transaction?.state, "committed");
+  assert.equal(result.rollbackHints?.[0]?.kind, "remove_created_task");
+  assert.ok(result.transaction?.artifactRef?.includes(".workflow/.runtime/transactions/"));
+  assert.match(await readFile(join(root, result.transaction!.artifactRef!), "utf8"), /Batch Execute/);
+});
+
+test("workflow compaction summary preserves active workflow state", () => {
+  const built = buildWorkflowCompactionSummary({
+    branchEntries: [
+      { type: "custom", customType: "pi-coding-workflow", data: { kind: "workflow_next", task: "06-12-demo", status: "in_progress", stage: "execute", flowLevel: "complex", nextAction: "implement_slice", artifactRefs: [".workflow/.runtime/checkpoints/a.json"] } },
+    ],
+    preparation: {
+      previousSummary: "Previous user goal and decisions.",
+      messagesToSummarize: [
+        { role: "user", content: [{ type: "text", text: "Please continue implementation." }] },
+        { role: "assistant", content: [{ type: "text", text: "I will run the workflow." }] },
+      ],
+      fileOps: { readFiles: ["src/index.ts"], modifiedFiles: ["src/engine/run.ts"] },
+    },
+  });
+
+  assert.ok(built);
+  assert.match(built!.summary, /activeTask: 06-12-demo/);
+  assert.match(built!.summary, /workflow_next/);
+  assert.ok(built!.details.modifiedFiles.includes("src/engine/run.ts"));
+});
+
+test("workflow telemetry writes schema-versioned JSONL events", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-telemetry-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Telemetry", level: "standard", slug: "telemetry" });
+  await workflowNext(root, { task: create.task });
+  const checkpointResult = await workflowRun(root, { action: "checkpoint", mode: "dry_run", task: create.task, phase: "custom" });
+
+  const events = await readTelemetryEvents(root);
+  assert.ok(events.some((event) => event.event === "workflow_run" && event.action === "create_from_grill" && event.schemaVersion === 1));
+  assert.ok(events.some((event) => event.event === "workflow_next" && event.task === create.task && typeof event.estimatedTokens === "number"));
+  assert.ok(events.some((event) => event.event === "workflow_run" && event.action === "checkpoint" && event.artifactRefs.includes(checkpointResult.artifactRef)));
+  const checkpoint = JSON.parse(await readFile(join(root, checkpointResult.artifactRef!), "utf8"));
+  assert.equal(checkpoint.kind, "pi-coding-workflow.checkpoint");
+  assert.equal(checkpoint.schemaVersion, 1);
+});
+
+test("start preflight blocks missing PRD", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-p1-missing-prd-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Missing PRD", level: "complex", slug: "missing-prd" });
+  await seedTaskPreflight(root, create.task!, { finishComplete: false });
+  await rm(join(root, ".workflow/tasks", create.task!, "prd.md"));
+
+  const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(start.ok, false);
+  assert.ok(blockerCodes(start).includes("prd_missing"));
+});
+
+test("start preflight blocks PRD TODO and missing manifest files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-p1-todo-manifest-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "TODO PRD", level: "complex", slug: "todo-prd" });
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("TODO PRD", { todo: true, finishComplete: false }), "utf8");
+
+  const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(start.ok, false);
+  assert.ok(blockerCodes(start).includes("prd_todo_present"));
+  assert.ok(blockerCodes(start).includes("implement_manifest_missing"));
+  assert.ok(blockerCodes(start).includes("check_manifest_missing"));
+});
+
+test("start preflight blocks blocking open questions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-p1-openq-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Open Question", level: "complex", slug: "open-question" });
+  await seedTaskPreflight(root, create.task!, { openQuestions: "- Which API should be used?", finishComplete: false });
+
+  const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(start.ok, false);
+  assert.ok(blockerCodes(start).includes("prd_open_questions_blocking"));
+});
+
+test("finish preflight blocks unchecked finish checklist without requiring message in dry-run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-p1-finish-block-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Finish Block", level: "complex", slug: "finish-block" });
+  await seedTaskPreflight(root, create.task!, { finishComplete: false });
+  const start = await workflowRun(root, { action: "start_checked", mode: "execute", task: create.task });
+  assert.equal(start.ok, true);
+
+  const finish = await workflowRun(root, { action: "finish_run", mode: "dry_run", task: create.task });
+  assert.equal(finish.ok, false);
+  assert.ok(blockerCodes(finish).includes("prd_acceptance_criteria_unchecked"));
+  assert.ok(blockerCodes(finish).includes("prd_validation_plan_unchecked"));
+  assert.ok(blockerCodes(finish).includes("prd_definition_of_done_unchecked"));
+});
+
+test("finish preflight passes completed checklist and execute still requires message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-p1-finish-pass-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Finish Pass", level: "complex", slug: "finish-pass" });
+  await seedTaskPreflight(root, create.task!, { finishComplete: true });
+  const start = await workflowRun(root, { action: "start_checked", mode: "execute", task: create.task });
+  assert.equal(start.ok, true);
+
+  const finishDryRun = await workflowRun(root, { action: "finish_run", mode: "dry_run", task: create.task });
+  assert.equal(finishDryRun.ok, true);
+
+  const finishWithoutMessage = await workflowRun(root, { action: "finish_run", mode: "execute", task: create.task });
+  assert.equal(finishWithoutMessage.ok, false);
+  assert.ok(blockerCodes(finishWithoutMessage).includes("missing_message"));
+
+  const finish = await workflowRun(root, { action: "finish_run", mode: "execute", task: create.task, message: "complete p1 gates" });
+  assert.equal(finish.ok, true);
+  assert.equal(finish.status, "completed");
 });

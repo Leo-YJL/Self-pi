@@ -10,7 +10,7 @@ export function defaultConfig(projectName = "Project", profile: ProfileName = "g
     package: { name: "pi-coding-workflow", requiredVersion: "0.1.0" },
     project: { name: projectName, profile, root: "." },
     workflow: { defaultFlowLevel: "standard", taskDir: ".workflow/tasks", specDir: ".workflow/spec", runtimeDir: ".workflow/.runtime" },
-    context: { defaultMode: "brief", maxSummaryChars: 2000, artifactMode: "summary-first" },
+    context: { defaultMode: "lite", maxSummaryChars: 2000, artifactMode: "summary-first" },
     git: { autoCommit: true, autoPush: true, pushConfirmation: "risky", protectedBranches: ["main", "master"], allowBroadStage: false },
     profiles: { enabled: [profile] },
   };

@@ -13,6 +13,17 @@ export async function checkpoint(root: string, phase = "custom", notes?: string)
     checks.push({ name: "git diff --check", passed: isNotGit, stdout: error.stdout, stderr: error.stderr, error: isNotGit ? "skipped: not a git repository" : error.message });
   }
   const passed = checks.every((check) => check.passed);
-  const artifact = await writeJsonArtifact(root, "checkpoints", { phase, notes, checks, createdAt: new Date().toISOString() });
-  return { passed, summary: passed ? "checkpoint passed" : "checkpoint failed", artifactRef: artifact.artifactRef, details: { checks } };
+  const summary = passed ? "checkpoint passed" : "checkpoint failed";
+  const artifact = await writeJsonArtifact(root, "checkpoints", {
+    schemaVersion: 1,
+    kind: "pi-coding-workflow.checkpoint",
+    package: { name: "pi-coding-workflow", version: "0.1.0" },
+    phase,
+    notes,
+    passed,
+    summary,
+    checks,
+    createdAt: new Date().toISOString(),
+  });
+  return { passed, summary, artifactRef: artifact.artifactRef, details: { checks } };
 }
