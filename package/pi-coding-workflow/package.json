@@ -2,12 +2,22 @@
   "name": "pi-coding-workflow",
   "version": "0.1.0",
   "description": "Generic coding workflow package for Pi with workflow_next/workflow_run tools and plan-based init-spec.",
-  "keywords": ["pi-package", "pi-extension", "workflow", "coding-agent", "unity"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "workflow",
+    "coding-agent",
+    "unity"
+  ],
   "type": "module",
   "license": "MIT",
   "pi": {
-    "extensions": ["./src/index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -17,9 +27,34 @@
   "scripts": {
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "smoke:unity-scanner": "node --experimental-strip-types -e \"import('./src/init/unityScanner.ts').then(()=>console.log('unity scanner import ok'))\"",
-    "replay:history": "node --experimental-strip-types src/replay/historyReplay.ts"
+    "replay:history": "node --experimental-strip-types src/replay/historyReplay.ts",
+    "prepublishOnly": "npm test && npm run smoke:unity-scanner"
   },
   "devDependencies": {
     "@types/node": "^24.0.0"
+  },
+  "author": "Leo-YJL",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Leo-YJL/Self-pi.git",
+    "directory": "package/pi-coding-workflow"
+  },
+  "bugs": {
+    "url": "https://github.com/Leo-YJL/Self-pi/issues"
+  },
+  "homepage": "https://github.com/Leo-YJL/Self-pi/tree/main/package/pi-coding-workflow",
+  "files": [
+    "src",
+    "skills",
+    "templates",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

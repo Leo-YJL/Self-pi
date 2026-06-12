@@ -32,6 +32,16 @@
 }
 ```
 
+## 安装
+
+发布到 npm 后可通过以下方式安装：
+
+```bash
+npm install pi-coding-workflow
+```
+
+如果在 Pi 项目中使用，请按照 Pi 的 package 加载方式引入该 npm 包；工作流运行时数据会写入目标项目的 `.workflow/**`。
+
 ## LLM 可见工具
 
 ### `workflow_next`
@@ -211,7 +221,7 @@ npm run replay:history -- <project-root> --variants as_is,planning,in_progress
 
 ## 开源协议
 
-本项目采用 [MIT License](../../LICENSE) 开源。
+本项目采用 [MIT License](LICENSE) 开源。
 
 你可以自由使用、复制、修改、合并、发布、分发、再授权或销售本项目代码，但需要在副本或主要部分中保留版权声明和许可声明。
 
@@ -251,6 +261,16 @@ npm run replay:history -- <project-root> --variants as_is,planning,in_progress
   }
 }
 ```
+
+## Installation
+
+After the package is published to npm, install it with:
+
+```bash
+npm install pi-coding-workflow
+```
+
+When used in a Pi project, load this npm package through Pi's package mechanism. Runtime workflow data is written under `.workflow/**` in the target project.
 
 ## LLM-visible tools
 
@@ -431,7 +451,7 @@ The replay tool copies historical tasks into temporary workspaces and does not m
 
 ## License
 
-This project is released under the [MIT License](../../LICENSE).
+This project is released under the [MIT License](LICENSE).
 
 You may use, copy, modify, merge, publish, distribute, sublicense and sell copies of the software, provided that the copyright and license notice are included in copies or substantial portions of the software.
 

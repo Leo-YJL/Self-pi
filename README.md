@@ -32,6 +32,16 @@
 }
 ```
 
+## 安装
+
+发布到 npm 后可通过以下方式安装：
+
+```bash
+npm install pi-coding-workflow
+```
+
+如果在 Pi 项目中使用，请按照 Pi 的 package 加载方式引入该 npm 包；工作流运行时数据会写入目标项目的 `.workflow/**`。
+
 ## LLM 可见工具
 
 ### `workflow_next`
@@ -251,6 +261,16 @@ npm run replay:history -- <project-root> --variants as_is,planning,in_progress
   }
 }
 ```
+
+## Installation
+
+After the package is published to npm, install it with:
+
+```bash
+npm install pi-coding-workflow
+```
+
+When used in a Pi project, load this npm package through Pi's package mechanism. Runtime workflow data is written under `.workflow/**` in the target project.
 
 ## LLM-visible tools
 
