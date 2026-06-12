@@ -209,6 +209,12 @@ npm run replay:history -- <project-root> --variants as_is,planning,in_progress
 
 回放工具会复制历史任务到临时 workspace 中执行，不会修改源项目。
 
+## 开源协议
+
+本项目采用 [MIT License](LICENSE) 开源。
+
+你可以自由使用、复制、修改、合并、发布、分发、再授权或销售本项目代码，但需要在副本或主要部分中保留版权声明和许可声明。
+
 ## 当前限制
 
 - 不执行 Git 自动 commit / push。
@@ -422,6 +428,12 @@ npm run replay:history -- <project-root> --variants as_is,planning,in_progress
 ```
 
 The replay tool copies historical tasks into temporary workspaces and does not mutate the source project.
+
+## License
+
+This project is released under the [MIT License](LICENSE).
+
+You may use, copy, modify, merge, publish, distribute, sublicense and sell copies of the software, provided that the copyright and license notice are included in copies or substantial portions of the software.
 
 ## Current limits
 

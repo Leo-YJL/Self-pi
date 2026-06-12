@@ -2,11 +2,12 @@
   "name": "pipackage",
   "version": "0.1.0",
   "private": true,
-  "description": "Personal Pi package monorepo.",
+  "description": "Open-source Pi coding workflow package workspace.",
   "workspaces": [
     "package/*"
   ],
   "scripts": {
     "test": "npm --workspace pi-coding-workflow test"
-  }
+  },
+  "license": "MIT"
 }
