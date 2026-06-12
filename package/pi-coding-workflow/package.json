@@ -1,5 +1,5 @@
 {
-  "name": "pi-coding-workflow",
+  "name": "@leo-yjl/pi-coding-workflow",
   "version": "0.1.0",
   "description": "Generic coding workflow package for Pi with workflow_next/workflow_run tools and plan-based init-spec.",
   "keywords": [

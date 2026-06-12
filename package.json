@@ -7,7 +7,7 @@
     "package/*"
   ],
   "scripts": {
-    "test": "npm --workspace pi-coding-workflow test"
+    "test": "npm --workspace package/pi-coding-workflow test"
   },
   "license": "MIT"
 }
