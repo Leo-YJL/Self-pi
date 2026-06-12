@@ -1,14 +1,25 @@
 # pi-coding-workflow
 
+<p align="right">
+  <a href="#中文">中文</a> | <a href="#english">English</a>
+</p>
+
+<a id="中文"></a>
+
+<details open>
+<summary><strong>中文说明</strong></summary>
+
+## 项目简介
+
 `pi-coding-workflow` 是一个面向 Pi 的通用编码工作流包。它通过 TypeScript 引擎管理任务状态、PRD gate、manifest 校验、上下文预算、缓存、遥测、压缩摘要和自适应路由，同时保持 LLM 可见工具面简洁稳定。
 
-## 目标
+## 核心目标
 
 - 只暴露两个 LLM 可见工具：`workflow_next` 和 `workflow_run`。
 - 将复杂工作流逻辑放在本地确定性引擎中，减少模型往返和 token 消耗。
-- 支持通用项目与 Unity 项目的 `.workflow` 初始化。
 - 默认返回轻量上下文，通过证据引用按需展开详情。
-- 避免恢复旧 wrapper、旧 Python engine 或大量 LLM 可见命令。
+- 支持通用项目与 Unity 项目的 `.workflow` 初始化。
+- 不恢复旧 wrapper、旧 Python engine 或大量 LLM 可见命令。
 
 ## Pi package 资源
 
@@ -25,20 +36,18 @@
 
 ### `workflow_next`
 
-语义只读的工作流路由工具。
-
-它不会修改项目源码、Git、task 状态或配置；但可能更新 `.workflow/.runtime` 下的 cache、telemetry 等运行时产物。
+语义只读的工作流路由工具。它不会修改项目源码、Git、task 状态或配置；但可能更新 `.workflow/.runtime` 下的 cache、telemetry 等运行时产物。
 
 主要返回：
 
-- 当前 task 状态。
-- 下一步建议。
-- blocker / warning。
-- `evidenceRefs`。
-- `omitted`。
-- `tokenBudget`。
-- `adaptiveControl`。
-- `meta`。
+- 当前 task 状态
+- 下一步建议
+- blocker / warning
+- `evidenceRefs`
+- `omitted`
+- `tokenBudget`
+- `adaptiveControl`
+- `meta`
 
 默认：
 
@@ -74,19 +83,6 @@ batch
 - 修改 task 状态需要 `mode: "execute"`。
 - `start_checked` 和 `finish_run` 会执行确定性 preflight。
 - `batch` 可顺序执行多个动作，并返回 transaction、artifact 和 rollback hints。
-
-示例：
-
-```json
-{
-  "action": "batch",
-  "mode": "dry_run",
-  "actions": [
-    { "action": "start_checked", "task": "06-12-example" },
-    { "action": "checkpoint", "task": "06-12-example", "phase": "after-implementation" }
-  ]
-}
-```
 
 ## Pi 命令
 
@@ -158,9 +154,7 @@ research | implement | check | finish | user | none
 
 ### Compaction
 
-扩展注册了 `session_before_compact` hook。
-
-当 Pi session 中存在 workflow 状态时，会生成 workflow-aware summary，保留 active task、下一步、artifact refs、文件操作和近期对话信号。
+扩展注册了 `session_before_compact` hook。当 Pi session 中存在 workflow 状态时，会生成 workflow-aware summary，保留 active task、下一步、artifact refs、文件操作和近期对话信号。
 
 ## 初始化产物边界
 
@@ -221,3 +215,219 @@ npm run replay:history -- <project-root> --variants as_is,planning,in_progress
 - 不提供旧 Python workflow wrapper。
 - 不增加额外 LLM 可见 subagent 工具。
 - rollback hints 目前是建议信息，不自动执行回滚。
+
+</details>
+
+<a id="english"></a>
+
+<details>
+<summary><strong>English</strong></summary>
+
+## Overview
+
+`pi-coding-workflow` is a generic coding workflow package for Pi. It keeps task state, PRD gates, manifest validation, context budgeting, caching, telemetry, compaction summaries and adaptive routing inside a TypeScript engine while keeping the LLM-visible tool surface small and stable.
+
+## Goals
+
+- Expose only two LLM-visible tools: `workflow_next` and `workflow_run`.
+- Move complex workflow behavior into a deterministic local engine to reduce model round trips and token usage.
+- Return lightweight context by default and expose detailed evidence only when requested.
+- Support `.workflow` initialization for generic and Unity projects.
+- Avoid restoring legacy wrappers, legacy Python engines or a large LLM-visible command surface.
+
+## Pi package resources
+
+```json
+{
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "skills": ["./skills"]
+  }
+}
+```
+
+## LLM-visible tools
+
+### `workflow_next`
+
+A semantic read-only workflow router. It does not mutate project source files, Git state, task status or configuration; it may update runtime cache and telemetry artifacts under `.workflow/.runtime`.
+
+Main fields returned:
+
+- current task state
+- recommended next action
+- blockers / warnings
+- `evidenceRefs`
+- `omitted`
+- `tokenBudget`
+- `adaptiveControl`
+- `meta`
+
+Default request:
+
+```json
+{ "includeContext": "lite" }
+```
+
+Request more detail only when needed:
+
+```json
+{ "includeContext": "task" }
+```
+
+### `workflow_run`
+
+A controlled workflow actuator.
+
+Supported actions:
+
+```text
+create_from_grill
+create_child
+start_checked
+checkpoint
+finish_run
+archive
+batch
+```
+
+Rules:
+
+- Defaults to `mode: "dry_run"`.
+- Task mutations require `mode: "execute"`.
+- `start_checked` and `finish_run` run deterministic preflight checks first.
+- `batch` runs multiple actions in order and returns transaction artifacts plus rollback hints.
+
+## Pi commands
+
+```text
+/workflow-init --dry-run
+/workflow-init --execute
+/workflow-init-spec --profile generic --dry-run
+/workflow-init-spec --profile unity --dry-run
+/workflow-init-spec --execute --plan <plan-id>
+/workflow-prd-confirm --task <task-id> --message "confirmed" --execute
+```
+
+Notes:
+
+- `/workflow-init` creates the base `.workflow` structure.
+- `/workflow-init-spec` creates or executes a spec initialization plan.
+- `/workflow-prd-confirm` records the PRD final confirmation gate through Pi UI, so the LLM does not need to relay human confirmation text.
+
+## Workflow capabilities
+
+### PRD / Manifest / Preflight
+
+The engine supports:
+
+- reading `.workflow/tasks/<task>/prd.md`
+- extracting the PRD kernel
+- detecting TODO / TBD markers
+- detecting blocking open questions
+- detecting the final confirmation gate
+- checking Acceptance Criteria, Validation Plan and Definition of Done
+- validating `implement.jsonl` and `check.jsonl`
+- running checkpoints such as `git diff --check`
+
+### Context budget and cache
+
+`workflow_next` returns lite context by default and reduces repeated context cost through:
+
+- `evidenceRefs`
+- `omitted`
+- `tokenBudget`
+- `meta`
+- fingerprint-backed workflow cache
+
+### Adaptive Control
+
+`workflow_next` returns `adaptiveControl` to guide the next strategy:
+
+```text
+deterministic_preflight | subagent_brief | ask_user | none
+```
+
+Recommended agent types:
+
+```text
+research | implement | check | finish | user | none
+```
+
+It emits compact briefs only and does not add extra LLM-visible subagent tools.
+
+### Telemetry
+
+Tool calls write schema-versioned telemetry JSONL under:
+
+```text
+.workflow/.runtime/telemetry/
+```
+
+Telemetry records token estimates, cache hits, blockers/warnings, artifact refs, transactions and elapsed time.
+
+### Compaction
+
+The extension registers a `session_before_compact` hook. When workflow state exists in a Pi session, it emits a workflow-aware summary that preserves the active task, next action, artifact refs, file operations and recent conversation signals.
+
+## Initialization boundaries
+
+Target projects use this structure:
+
+```text
+.workflow/
+  config.json
+  tasks/
+  spec/
+  .runtime/
+```
+
+Conventions:
+
+- `.workflow/spec/**` stores durable project knowledge.
+- `.workflow/tasks/**` stores task data.
+- `.workflow/.runtime/**` stores cache, telemetry, checkpoints, transactions and other runtime artifacts.
+- Initialization does not copy the engine and does not create legacy wrappers.
+
+## Profiles
+
+### `generic`
+
+Generic project spec skeleton.
+
+### `unity`
+
+Generic Unity project spec skeleton.
+
+Generated files:
+
+```text
+.workflow/spec/modules/unity-project.md
+.workflow/spec/modules/unity-assets.md
+```
+
+The Unity profile does not assume a specific resource system by default. Resource-system candidates are recorded only when project facts are detected.
+
+## Local development
+
+```bash
+npm test
+npm run smoke:unity-scanner
+```
+
+Historical task replay:
+
+```bash
+npm run replay:history -- <project-root> --variants as_is,planning,in_progress
+```
+
+The replay tool copies historical tasks into temporary workspaces and does not mutate the source project.
+
+## Current limits
+
+- No automatic Git commit / push.
+- No legacy Python workflow wrapper.
+- No extra LLM-visible subagent tools.
+- Rollback hints are advisory and are not executed automatically.
+
+</details>
