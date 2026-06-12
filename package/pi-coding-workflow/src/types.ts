@@ -45,6 +45,27 @@ export interface WorkflowResultMeta {
   cacheHit?: boolean;
 }
 
+export interface WorkflowSubagentBrief {
+  agent: WorkflowAgent;
+  goal: string;
+  triggerCodes: string[];
+  contextRefs: string[];
+  instructions: string[];
+  stopConditions: string[];
+  expectedOutput: string;
+}
+
+export interface WorkflowAdaptiveControl {
+  strategy: "deterministic_preflight" | "subagent_brief" | "ask_user" | "none";
+  recommendedAgent: WorkflowAgent | "user" | "none";
+  risk: "low" | "medium" | "high";
+  confidence: number;
+  reasons: string[];
+  deterministicActions: WorkflowRecommendedCall[];
+  subagentBriefs: WorkflowSubagentBrief[];
+  stopConditions: string[];
+}
+
 export interface WorkflowContextSummary {
   mode: ContextMode;
   summary: string;
@@ -53,6 +74,7 @@ export interface WorkflowContextSummary {
   evidenceRefs?: string[];
   omitted?: WorkflowOmittedArtifact[];
   tokenBudget?: WorkflowTokenBudget;
+  adaptiveControl?: WorkflowAdaptiveControl;
   details?: unknown;
 }
 
@@ -77,6 +99,7 @@ export interface WorkflowNextOutput {
   evidenceRefs?: string[];
   omitted?: WorkflowOmittedArtifact[];
   tokenBudget?: WorkflowTokenBudget;
+  adaptiveControl?: WorkflowAdaptiveControl;
   cache?: { stableKey?: string; taskKey?: string; dynamicKey?: string; cacheKey?: string; cacheFriendly: boolean; hit?: boolean };
   artifactRef?: string;
   meta?: WorkflowResultMeta;

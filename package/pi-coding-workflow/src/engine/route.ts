@@ -7,6 +7,7 @@ import { buildContextBundle, type WorkflowContextBundle } from "./contextBundle.
 import { contextBudgetPolicy, estimateTokens, omitted, tokenBudget, truncateText } from "./contextBudget.ts";
 import { computeWorkflowNextCacheKey, readWorkflowNextCache, writeWorkflowNextCache } from "./cache.ts";
 import { writeWorkflowTelemetry } from "./telemetry.ts";
+import { buildAdaptiveControl, compactAdaptiveControl } from "./adaptive.ts";
 
 export async function workflowNext(root: string, input: WorkflowNextInput = {}): Promise<WorkflowNextOutput> {
   const startedAt = Date.now();
@@ -59,7 +60,8 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   }
 
   const bundle = includeContext === "none" ? null : await buildContextBundle(root, task, { mode: includeContext, agent: input.agent, profile, detail: input.detail });
-  const context = bundle ? contextFromBundle(bundle, input.detail) : undefined;
+  const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent })) : undefined;
+  const context = bundle ? contextFromBundle(bundle, input.detail, adaptiveControl) : undefined;
   const output: WorkflowNextOutput = {
     ok: true,
     status: task.status,
@@ -74,6 +76,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     evidenceRefs: context?.evidenceRefs,
     omitted: context?.omitted,
     tokenBudget: context?.tokenBudget,
+    adaptiveControl,
     cache: {
       stableKey: "workflow-next:v2",
       cacheFriendly: true,
@@ -103,7 +106,7 @@ function emptyContext(mode: WorkflowContextSummary["mode"], summaryText: string,
   };
 }
 
-function contextFromBundle(bundle: WorkflowContextBundle, detail: DetailMode = "summary"): WorkflowContextSummary {
+function contextFromBundle(bundle: WorkflowContextBundle, detail: DetailMode = "summary", adaptiveControl?: WorkflowContextSummary["adaptiveControl"]): WorkflowContextSummary {
   const policy = contextBudgetPolicy(bundle.mode, detail);
   const evidenceRefs = evidenceRefsFor(bundle);
   const omittedItems: WorkflowOmittedArtifact[] = [];
@@ -122,7 +125,7 @@ function contextFromBundle(bundle: WorkflowContextBundle, detail: DetailMode = "
     omittedItems.push(omitted("context.details", "workflow_next.details", detailedContext(bundle), `${bundle.mode} mode returns evidence refs instead of full details.`));
   }
 
-  const valueForBudget = { summary: truncatedSummary.text, evidenceRefs, details };
+  const valueForBudget = { summary: truncatedSummary.text, evidenceRefs, adaptiveControl, details };
   return {
     mode: bundle.mode,
     summary: truncatedSummary.text,
@@ -130,6 +133,7 @@ function contextFromBundle(bundle: WorkflowContextBundle, detail: DetailMode = "
     evidenceRefs,
     omitted: omittedItems,
     tokenBudget: tokenBudget(valueForBudget, policy.maxRecommendedTokens, { truncatedBytes, omitted: omittedItems }),
+    adaptiveControl,
     details,
   };
 }
@@ -236,6 +240,7 @@ function finalizeNext(output: WorkflowNextOutput, startedAt: number): WorkflowNe
     evidenceRefs: output.evidenceRefs ?? output.context?.evidenceRefs,
     omitted: output.omitted ?? output.context?.omitted,
     tokenBudget: output.tokenBudget ?? output.context?.tokenBudget,
+    adaptiveControl: output.adaptiveControl ?? output.context?.adaptiveControl,
     meta,
   };
 }

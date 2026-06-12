@@ -243,6 +243,35 @@ test("workflow_next defaults to lite context with budget metadata", async () => 
   assert.equal(cached.meta?.cacheHit, true);
 });
 
+test("workflow_next adaptive control emits implement subagent brief after start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-adaptive-implement-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Adaptive Implement", level: "complex", slug: "adaptive-implement" });
+  await seedTaskPreflight(root, create.task!, { finishComplete: false });
+  const start = await workflowRun(root, { action: "start_checked", mode: "execute", task: create.task });
+  assert.equal(start.ok, true);
+
+  const next = await workflowNext(root, { task: create.task });
+  assert.equal(next.adaptiveControl?.strategy, "subagent_brief");
+  assert.equal(next.adaptiveControl?.recommendedAgent, "implement");
+  assert.equal(next.adaptiveControl?.subagentBriefs[0]?.agent, "implement");
+  assert.ok(next.adaptiveControl?.subagentBriefs[0]?.instructions.some((line) => line.includes("manifest")));
+});
+
+test("workflow_next adaptive control prefers deterministic finish preflight", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-adaptive-finish-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Adaptive Finish", level: "standard", slug: "adaptive-finish" });
+  await seedTaskPreflight(root, create.task!, { finishComplete: true });
+  const start = await workflowRun(root, { action: "start_checked", mode: "execute", task: create.task });
+  assert.equal(start.ok, true);
+
+  const next = await workflowNext(root, { task: create.task, agent: "finish" });
+  assert.equal(next.adaptiveControl?.strategy, "deterministic_preflight");
+  assert.equal(next.adaptiveControl?.recommendedAgent, "finish");
+  assert.equal(next.adaptiveControl?.deterministicActions[0]?.arguments.action, "finish_run");
+});
+
 test("workflow-prd-confirm engine records final confirmation without LLM", async () => {
   const root = await mkdtemp(join(tmpdir(), "pcw-prd-confirm-"));
   await executeInitWorkspace(root, "generic");

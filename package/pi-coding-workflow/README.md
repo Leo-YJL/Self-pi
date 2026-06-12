@@ -24,7 +24,7 @@
 
 ## LLM-visible tools
 
-- `workflow_next`: semantic read-only router. It does not mutate project source, Git, tasks or config; it may update `.workflow/.runtime` cache/session artifacts. It detects root active tasks from `.workflow/tasks/**/task.json`, supports both package camelCase and legacy GameBase snake_case task fields, recommends the next stage action, and defaults to `includeContext: "lite"` with `evidenceRefs`, `omitted`, `tokenBudget` and `meta` fields. Use `includeContext: "task" | "check" | "finish"` only when details are needed.
+- `workflow_next`: semantic read-only router. It does not mutate project source, Git, tasks or config; it may update `.workflow/.runtime` cache/session artifacts. It detects root active tasks from `.workflow/tasks/**/task.json`, supports both package camelCase and legacy GameBase snake_case task fields, recommends the next stage action, and defaults to `includeContext: "lite"` with `evidenceRefs`, `omitted`, `tokenBudget`, `adaptiveControl` and `meta` fields. Use `includeContext: "task" | "check" | "finish"` only when details are needed.
 - `workflow_run`: controlled actuator for workflow actions. Mutating actions require `mode: "execute"`; dry-run is the default. `start_checked` and `finish_run` run deterministic preflight gates before mutating task state. Results include `nextRecommendedCall`, `artifacts` and `meta`; `action: "batch"` supports deterministic `actions[]` sequences.
 
 Current daily flow:
@@ -71,8 +71,9 @@ Start preflight blocks incomplete planning tasks when PRD/manifest/final confirm
 - Tool results are compact JSON by default to reduce repeated prompt tokens.
 - `workflow_next` reports `evidenceRefs` and `omitted` so the LLM can ask for details only when needed.
 - `workflow_next` / `workflow_run` append a lightweight `pi-coding-workflow` session entry through `pi.appendEntry()`. This keeps active task, next action, artifact refs and token-budget metadata available to Pi session state without injecting long workflow logs into LLM context.
+- `workflow_next` returns `adaptiveControl`, a compact deterministic/subagent strategy. It recommends when to run workflow preflight first, when to ask the user through Pi UI, and when to follow a research/implement/check/finish brief without adding extra LLM-visible tools.
 - `workflow_next` lite/brief calls use a fingerprint-backed workflow cache under `.workflow/.runtime/cache/pi-workflow/context-cache.json`. The cache key includes task state, PRD/manifest/config fingerprints, selected profile/detail/agent and a workspace fingerprint. Cache hits are reported in `cache.hit`, `tokenBudget.cacheHit` and `meta.cacheHit`.
-- `workflow_next` / `workflow_run` write schema-versioned telemetry JSONL under `.workflow/.runtime/telemetry/` with 512 KiB daily file rotation. See `docs/telemetry-schema.md`.
+- `workflow_next` / `workflow_run` write schema-versioned telemetry JSONL under `.workflow/.runtime/telemetry/` with 512 KiB daily file rotation.
 - The extension registers a `session_before_compact` hook. When Pi compacts a session that contains `pi-coding-workflow` session entries, it emits a workflow-aware compaction summary preserving active task, phase, next action, artifact refs, file ops and recent non-tool conversation signals.
 
 ## Commands
@@ -104,20 +105,12 @@ Unity first version creates:
 
 It intentionally does not create `editor-and-build.md`.
 
-## Documentation
-
-- `docs/tool-contract.md` — `workflow_next` / `workflow_run` input/output contract and blocker conventions.
-- `docs/initialization-contract.md` — workspace/spec init output boundaries.
-- `docs/runtime-coverage.md` — legacy runtime capability coverage matrix.
-- `docs/legacy-file-migration.md` — decisions for old wrappers/prompts/project data.
-- `docs/telemetry-schema.md` — telemetry/checkpoint/transaction/cache runtime schemas.
-- `docs/compaction.md` — workflow-aware Pi compaction behavior.
-
 ## Local tests
 
 ```bash
 node --test --experimental-strip-types tests/*.test.ts
 node --experimental-strip-types -e "import('./src/init/unityScanner.ts').then(()=>console.log('unity scanner import ok'))"
+npm run replay:history -- "D:/YJL_AI/GameBase" --variants as_is,planning,in_progress
 ```
 
 ## Limits
@@ -125,4 +118,4 @@ node --experimental-strip-types -e "import('./src/init/unityScanner.ts').then(()
 - No Python engine.
 - No compatibility aliases for old GameBase `workflow.py` commands.
 - No default Addressables/YooAsset/AssetBundle rules; resource systems are detected from project facts.
-- Git finalizer/auto commit/push, subagent brief and adaptive control remain future package slices.
+- Git finalizer/auto commit/push and automatic subagent execution remain future package slices.

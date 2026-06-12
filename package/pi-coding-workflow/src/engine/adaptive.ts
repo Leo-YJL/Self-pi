@@ -1,0 +1,251 @@
+import type { WorkflowAdaptiveControl, WorkflowAgent, WorkflowBlocker, WorkflowNextOutput, WorkflowRecommendedCall, WorkflowSubagentBrief, WorkflowWarning } from "../types.ts";
+import type { WorkflowContextBundle } from "./contextBundle.ts";
+
+interface AdaptiveInput {
+  bundle: WorkflowContextBundle;
+  nextAction: WorkflowNextOutput["nextAction"];
+  recommendedTool?: WorkflowNextOutput["recommendedTool"];
+  requestedAgent?: WorkflowAgent;
+}
+
+const RESEARCH_CODES = new Set([
+  "prd_open_questions_blocking",
+  "open_questions_maybe_present",
+]);
+
+const USER_GATE_CODES = new Set([
+  "prd_final_confirmation_missing",
+  "user_confirmation_required",
+]);
+
+const IMPLEMENT_CODES = new Set([
+  "implement_manifest_missing",
+  "implement_manifest_empty",
+  "implement_manifest_file_missing",
+  "implement_manifest_invalid_json",
+  "implement_manifest_missing_fields",
+  "manifest_file_missing",
+]);
+
+const CHECK_CODES = new Set([
+  "check_manifest_missing",
+  "check_manifest_empty",
+  "check_manifest_file_missing",
+  "check_manifest_invalid_json",
+  "check_manifest_missing_fields",
+  "git_diff_check_failed",
+  "workspace_unrelated_dirty",
+]);
+
+const FINISH_CODES = new Set([
+  "prd_acceptance_criteria_missing",
+  "prd_acceptance_criteria_unchecked",
+  "prd_acceptance_criteria_no_checklist",
+  "prd_validation_plan_missing",
+  "prd_validation_plan_unchecked",
+  "prd_validation_plan_no_checklist",
+  "prd_definition_of_done_missing",
+  "prd_definition_of_done_unchecked",
+  "prd_definition_of_done_no_checklist",
+]);
+
+export function buildAdaptiveControl(input: AdaptiveInput): WorkflowAdaptiveControl {
+  const codes = [...input.bundle.blockedBy.map((item) => item.code), ...input.bundle.warnings.map((item) => item.code)];
+  const blockers = input.bundle.blockedBy;
+  const warnings = input.bundle.warnings;
+  const evidenceRefs = evidenceRefsFor(input.bundle, codes);
+  const deterministicActions = deterministicActionsFor(input);
+  const recommendedAgent = chooseAgent(input, codes, blockers);
+  const shouldAskUser = blockers.some((blocker) => USER_GATE_CODES.has(blocker.code));
+  const shouldSpawnSubagent = recommendedAgent !== "none" && recommendedAgent !== "user" && !shouldAskUser;
+  const risk = riskFor(input.bundle, blockers, warnings);
+  const reasons = reasonLines(input, recommendedAgent, codes, blockers, warnings);
+
+  return {
+    strategy: shouldAskUser
+      ? "ask_user"
+      : deterministicActions.length > 0
+        ? "deterministic_preflight"
+        : shouldSpawnSubagent
+          ? "subagent_brief"
+          : "none",
+    recommendedAgent,
+    risk,
+    confidence: confidenceFor(input.bundle, blockers, warnings),
+    reasons,
+    deterministicActions,
+    subagentBriefs: shouldSpawnSubagent ? [briefFor(recommendedAgent, input, codes, evidenceRefs)] : [],
+    stopConditions: stopConditionsFor(input.bundle, blockers),
+  };
+}
+
+export function compactAdaptiveControl(control: WorkflowAdaptiveControl): WorkflowAdaptiveControl {
+  return {
+    ...control,
+    reasons: control.reasons.slice(0, 5),
+    deterministicActions: control.deterministicActions.slice(0, 3),
+    subagentBriefs: control.subagentBriefs.map((brief) => ({
+      ...brief,
+      contextRefs: brief.contextRefs.slice(0, 8),
+      instructions: brief.instructions.slice(0, 6),
+      stopConditions: brief.stopConditions.slice(0, 5),
+    })).slice(0, 1),
+    stopConditions: control.stopConditions.slice(0, 6),
+  };
+}
+
+function chooseAgent(input: AdaptiveInput, codes: string[], blockers: WorkflowBlocker[]): WorkflowAdaptiveControl["recommendedAgent"] {
+  if (blockers.some((blocker) => USER_GATE_CODES.has(blocker.code))) return "user";
+  if (codes.some((code) => RESEARCH_CODES.has(code))) return "research";
+  if (codes.some((code) => CHECK_CODES.has(code))) return "check";
+  if (codes.some((code) => IMPLEMENT_CODES.has(code))) return "implement";
+  if (codes.some((code) => FINISH_CODES.has(code))) return "finish";
+
+  if (input.requestedAgent) return input.requestedAgent;
+  if (input.bundle.task.status === "planning") return "research";
+  if (input.bundle.task.status === "in_progress" && input.nextAction === "finish_dry_run") return "finish";
+  if (input.bundle.task.status === "in_progress" && input.nextAction === "checkpoint") return "check";
+  if (input.bundle.task.status === "in_progress") return "implement";
+  return "none";
+}
+
+function deterministicActionsFor(input: AdaptiveInput): WorkflowRecommendedCall[] {
+  const actions: WorkflowRecommendedCall[] = [];
+  const task = input.bundle.task.id;
+  if (input.bundle.task.status === "planning" && input.bundle.blockedBy.length === 0) {
+    actions.push({ name: "workflow_run", arguments: { action: "start_checked", mode: "dry_run", task } });
+  }
+  if (input.bundle.task.status === "in_progress" && input.requestedAgent === "finish") {
+    actions.push({ name: "workflow_run", arguments: { action: "finish_run", mode: "dry_run", task } });
+  }
+  if (input.bundle.task.status === "in_progress" && input.requestedAgent === "check") {
+    actions.push({ name: "workflow_run", arguments: { action: "checkpoint", mode: "dry_run", task, phase: "after-check" } });
+  }
+  if (input.recommendedTool && input.nextAction !== "implement_slice" && input.bundle.blockedBy.length === 0 && actions.length === 0) {
+    actions.push({ name: input.recommendedTool.name, arguments: input.recommendedTool.arguments as Record<string, unknown> });
+  }
+  return actions;
+}
+
+function briefFor(agent: Exclude<WorkflowAdaptiveControl["recommendedAgent"], "none" | "user">, input: AdaptiveInput, codes: string[], evidenceRefs: string[]): WorkflowSubagentBrief {
+  const task = input.bundle.task;
+  const blockers = input.bundle.blockedBy.map((blocker) => `${blocker.code}: ${blocker.message}`);
+  const warnings = input.bundle.warnings.map((warning) => `${warning.code}: ${warning.message}`);
+  const baseConstraints = [
+    "Use workflow_next first if the provided evidenceRefs are insufficient.",
+    "Do not mutate unrelated dirty files.",
+    "Do not bypass workflow_run preflight gates.",
+    "Keep durable facts in .workflow/spec/** when the task establishes reusable project knowledge.",
+  ];
+
+  if (agent === "research") {
+    return {
+      agent,
+      goal: `Resolve planning uncertainty for ${task.id} without changing source files.`,
+      triggerCodes: codes.filter((code) => RESEARCH_CODES.has(code) || code.includes("prd")),
+      contextRefs: evidenceRefs,
+      instructions: [
+        ...baseConstraints,
+        "Inspect PRD open questions and relevant spec files only as needed.",
+        "Return concrete decisions or ask the user if a human choice is required.",
+        "Prefer updating the PRD through normal file edits, then rerun workflow_next.",
+      ],
+      stopConditions: ["Blocking open questions are resolved or converted to explicit user decisions.", "PRD has no TODO/TBD blockers.", "Final confirmation is ready for /workflow-prd-confirm."],
+      expectedOutput: "A short decision list and exact PRD/spec updates needed before start_checked.",
+    };
+  }
+
+  if (agent === "check") {
+    return {
+      agent,
+      goal: `Check task ${task.id} against PRD, manifests and current diff.`,
+      triggerCodes: codes.filter((code) => CHECK_CODES.has(code) || code.includes("check") || code.includes("git")),
+      contextRefs: evidenceRefs,
+      instructions: [
+        ...baseConstraints,
+        "Run deterministic checks first (manifest validation, git diff --check, configured project tests when known).",
+        "Classify failures as task-related, unrelated workspace dirt, or environment limitation.",
+        "Record validation limits in PRD/check notes instead of inventing pass evidence.",
+      ],
+      stopConditions: ["No check manifest blockers remain.", "git diff --check passes or limitation is explicit.", "Unrelated dirty files are preserved."],
+      expectedOutput: "A concise check report with blocker fixes and the next workflow_run checkpoint/finish recommendation.",
+    };
+  }
+
+  if (agent === "finish") {
+    return {
+      agent,
+      goal: `Close finish gates for ${task.id}.`,
+      triggerCodes: codes.filter((code) => FINISH_CODES.has(code) || code.includes("finish") || code.includes("prd_")),
+      contextRefs: evidenceRefs,
+      instructions: [
+        ...baseConstraints,
+        "Verify acceptance criteria, validation plan and Definition of Done checklists against actual evidence.",
+        "Do not mark unchecked items complete unless evidence exists; record limitations explicitly.",
+        "After fixes, run workflow_run finish_run dry_run before execute.",
+      ],
+      stopConditions: ["Acceptance criteria are checked or explicitly N/A.", "Validation plan is checked or limitation is recorded.", "Definition of Done is checked."],
+      expectedOutput: "A finish-readiness summary and exact checklist updates, followed by finish_run dry-run recommendation.",
+    };
+  }
+
+  return {
+    agent: "implement",
+    goal: `Implement the next manifest-backed slice for ${task.id}.`,
+    triggerCodes: codes.filter((code) => IMPLEMENT_CODES.has(code) || code.includes("implement")),
+    contextRefs: evidenceRefs,
+    instructions: [
+      ...baseConstraints,
+      "Read only the files named by implement/check manifests unless evidence is insufficient.",
+      "Make the smallest source changes needed for the current PRD slice.",
+      "Update implement/check manifests if planned files change.",
+      "After implementation, run workflow_run checkpoint with phase=after-implementation.",
+    ],
+    stopConditions: ["Manifest-backed source changes are complete.", "No unrelated files were modified.", "A checkpoint dry-run has been recommended or executed."],
+    expectedOutput: "A concise implementation summary, changed files, validation performed/limited, and next checkpoint call.",
+  };
+}
+
+function evidenceRefsFor(bundle: WorkflowContextBundle, codes: string[]): string[] {
+  const refs = [
+    `task:${bundle.task.id}`,
+    `prd:${bundle.prd.source.hash ?? "missing"}`,
+    `manifest:implement:${bundle.manifests.implement.hash ?? "missing"}`,
+    `manifest:check:${bundle.manifests.check.hash ?? "missing"}`,
+    "workspace:git-status",
+  ];
+  refs.push(...codes.slice(0, 8).map((code) => `signal:${code}`));
+  return [...new Set(refs)];
+}
+
+function reasonLines(input: AdaptiveInput, agent: WorkflowAdaptiveControl["recommendedAgent"], codes: string[], blockers: WorkflowBlocker[], warnings: WorkflowWarning[]): string[] {
+  const reasons = [`Task ${input.bundle.task.id} is ${input.bundle.task.status}/${input.bundle.task.stage}; route=${input.nextAction}; recommendedAgent=${agent}.`];
+  if (blockers.length > 0) reasons.push(`Blocking signals: ${blockers.map((blocker) => blocker.code).slice(0, 6).join(", ")}.`);
+  if (warnings.length > 0) reasons.push(`Warning signals: ${warnings.map((warning) => warning.code).slice(0, 6).join(", ")}.`);
+  if (codes.includes("workspace_unrelated_dirty")) reasons.push("Unrelated workspace dirt requires check discipline before broad edits or finish.");
+  if (agent === "user") reasons.push("A human gate is required; use Pi command/UI instead of LLM relay when possible.");
+  return reasons;
+}
+
+function stopConditionsFor(bundle: WorkflowContextBundle, blockers: WorkflowBlocker[]): string[] {
+  const result = blockers.map((blocker) => `Resolve blocker ${blocker.code}.`);
+  if (bundle.task.status === "planning") result.push("workflow_run start_checked dry-run passes before execute.");
+  if (bundle.task.status === "in_progress") result.push("workflow_run checkpoint or finish_run dry-run is run before final execute.");
+  return result.length > 0 ? result : ["No adaptive stop condition beyond the recommended workflow_run preflight."];
+}
+
+function riskFor(bundle: WorkflowContextBundle, blockers: WorkflowBlocker[], warnings: WorkflowWarning[]): WorkflowAdaptiveControl["risk"] {
+  if (blockers.some((blocker) => blocker.severity === "blocking")) return "high";
+  if (bundle.task.flowLevel === "complex" || bundle.task.flowLevel === "goal") return warnings.length > 0 ? "high" : "medium";
+  if (warnings.length > 0) return "medium";
+  return "low";
+}
+
+function confidenceFor(bundle: WorkflowContextBundle, blockers: WorkflowBlocker[], warnings: WorkflowWarning[]): number {
+  let confidence = 0.72;
+  if (bundle.prd.source.exists) confidence += 0.08;
+  if (bundle.manifests.implement.exists && bundle.manifests.check.exists) confidence += 0.08;
+  if (blockers.length > 0) confidence -= 0.1;
+  if (warnings.length > 2) confidence -= 0.05;
+  return Math.max(0.35, Math.min(0.95, Number(confidence.toFixed(2))));
+}

@@ -9,7 +9,8 @@ export async function checkpoint(root: string, phase = "custom", notes?: string)
     const result = await execFileAsync("git", ["diff", "--check"], { cwd: root, timeout: 10_000 });
     checks.push({ name: "git diff --check", passed: true, stdout: result.stdout, stderr: result.stderr });
   } catch (error: any) {
-    const isNotGit = String(error.stderr ?? error.message).includes("not a git repository");
+    const text = `${error.stderr ?? ""}\n${error.stdout ?? ""}\n${error.message ?? ""}`;
+    const isNotGit = /not a git repository/i.test(text);
     checks.push({ name: "git diff --check", passed: isNotGit, stdout: error.stdout, stderr: error.stderr, error: isNotGit ? "skipped: not a git repository" : error.message });
   }
   const passed = checks.every((check) => check.passed);

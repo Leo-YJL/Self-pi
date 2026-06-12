@@ -9,12 +9,12 @@ import type { WorkflowTaskJson } from "./task.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 
 const execFileAsync = promisify(execFile);
-const CACHE_SCHEMA_VERSION = 1;
+const CACHE_SCHEMA_VERSION = 2;
 const PACKAGE_VERSION = "0.1.0";
 const MAX_CACHE_ENTRIES = 25;
 
 interface CacheFile {
-  schemaVersion: 1;
+  schemaVersion: 2;
   package: { name: "pi-coding-workflow"; version: string };
   entries: Record<string, WorkflowNextCacheEntry>;
 }
@@ -143,7 +143,7 @@ async function writeCacheFile(root: string, cache: CacheFile): Promise<void> {
 }
 
 function emptyCacheFile(): CacheFile {
-  return { schemaVersion: 1, package: { name: "pi-coding-workflow", version: PACKAGE_VERSION }, entries: {} };
+  return { schemaVersion: CACHE_SCHEMA_VERSION, package: { name: "pi-coding-workflow", version: PACKAGE_VERSION }, entries: {} };
 }
 
 function cachePath(root: string): string {

@@ -8,7 +8,9 @@ Use this generic skill only for active coding workflow projects using `pi-coding
 
 ## Rules
 
-- Prefer `workflow_next` for read-only routing.
+- Prefer `workflow_next` for read-only routing and adaptive planning/research guidance.
+- If `adaptiveControl.recommendedAgent` is `research`, follow the returned brief to resolve PRD uncertainty before implementation.
+- Use `/workflow-prd-confirm` for final human confirmation instead of asking the LLM to relay confirmation text.
 - Prefer `workflow_run` for controlled workflow actions.
 - Do not use deprecated prompt wrappers or legacy command aliases.
 - Keep project-specific facts in the project `.workflow/spec/**` overlay.

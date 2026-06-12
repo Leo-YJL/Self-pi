@@ -16,7 +16,8 @@
   },
   "scripts": {
     "test": "node --test --experimental-strip-types tests/*.test.ts",
-    "smoke:unity-scanner": "node --experimental-strip-types -e \"import('./src/init/unityScanner.ts').then(()=>console.log('unity scanner import ok'))\""
+    "smoke:unity-scanner": "node --experimental-strip-types -e \"import('./src/init/unityScanner.ts').then(()=>console.log('unity scanner import ok'))\"",
+    "replay:history": "node --experimental-strip-types src/replay/historyReplay.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0"
