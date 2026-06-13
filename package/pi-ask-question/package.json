@@ -1,0 +1,46 @@
+{
+  "name": "@leo-yjl/pi-ask-question",
+  "version": "0.1.0",
+  "description": "Pi package for structured user clarification and decision-card questions.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "ask-user-question",
+    "decision-card",
+    "clarifying-questions"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "author": "Leo-YJL",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Leo-YJL/Self-pi.git",
+    "directory": "package/pi-ask-question"
+  },
+  "bugs": {
+    "url": "https://github.com/Leo-YJL/Self-pi/issues"
+  },
+  "homepage": "https://github.com/Leo-YJL/Self-pi/tree/main/package/pi-ask-question",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
