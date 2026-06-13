@@ -12,7 +12,7 @@ import { resolveInsideRoot } from "../src/safety/pathPolicy.ts";
 import { writeJsonArtifact } from "../src/artifacts/writeToolResult.ts";
 import { workflowNext } from "../src/engine/route.ts";
 import { workflowRun } from "../src/engine/run.ts";
-import { readPrdKernel } from "../src/engine/prd.ts";
+import { prdConfirmationHash, readPrdKernel } from "../src/engine/prd.ts";
 import { readManifest } from "../src/engine/manifest.ts";
 import { confirmPrdFinal } from "../src/engine/prdConfirm.ts";
 import { buildWorkflowCompactionSummary } from "../src/engine/compaction.ts";
@@ -31,12 +31,14 @@ async function fakeUnityProject() {
   return root;
 }
 
-function prdMarkdown(title: string, options: { todo?: boolean; openQuestions?: string; finalConfirmed?: boolean; finishComplete?: boolean } = {}): string {
+function prdMarkdown(title: string, options: { todo?: boolean; openQuestions?: string; finalConfirmed?: boolean; finishComplete?: boolean; decisionIds?: string[] } = {}): string {
   const todo = options.todo ? "TODO" : "Deliver the requested package workflow slice.";
   const openQuestions = options.openQuestions ?? "None.";
   const finalConfirmed = options.finalConfirmed ?? true;
   const checked = options.finishComplete ? "x" : " ";
-  return `# ${title}
+  const decisionIds = options.decisionIds ?? [];
+  const decisionLog = decisionIds.length > 0 ? `\n## Grill Decision Log\n${decisionIds.map((id) => `- ${id}`).join("\n")}\n` : "";
+  const body = `# ${title}
 
 ## Execution Contract
 - Flow Level: complex
@@ -49,7 +51,7 @@ Ship deterministic workflow package preflight behavior.
 ## Requirements
 - R1: Parse PRD kernel.
 - R2: Validate manifests.
-
+${decisionLog}
 ## Acceptance Criteria
 - [${checked}] PRD gates are enforced.
 - [${checked}] Manifest files are validated.
@@ -65,10 +67,11 @@ ${openQuestions}
 
 ## Out of Scope
 - Git finalizer execution.
-
-## Final Confirmation Before Implementation
-- Status: ${finalConfirmed ? "confirmed" : "pending"}
 `;
+  const confirmation = finalConfirmed
+    ? `- Status: confirmed\n- Confirmed PRD Hash: ${prdConfirmationHash(body)}\n`
+    : "- Status: pending\n";
+  return `${body}\n## Final Confirmation Before Implementation\n${confirmation}`;
 }
 
 async function seedManifestFiles(root: string) {
@@ -81,24 +84,28 @@ async function seedManifestFiles(root: string) {
 async function seedTaskPreflight(root: string, taskId: string, options: Parameters<typeof prdMarkdown>[1] = {}) {
   await seedManifestFiles(root);
   const taskDir = join(root, ".workflow/tasks", taskId);
-  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Ready Task", options), "utf8");
+  const decisionIds = options.decisionIds ?? ["test.scope-confirmed", "test.runtime-confirmed", "test.validation-confirmed"];
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Ready Task", { ...options, decisionIds }), "utf8");
   await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
   await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
 
   const finalConfirmed = options.finalConfirmed ?? true;
   const canFinalizeGrill = !options.todo && finalConfirmed && isNeutralOpenQuestions(options.openQuestions ?? "None.");
   if (canFinalizeGrill) {
-    const decision = await workflowRun(root, {
-      action: "record_grill_decision",
-      mode: "execute",
-      task: taskId,
-      decisionId: "test.scope-confirmed",
-      decisionSeverity: "blocking",
-      decisionSource: "user",
-      decisionSummary: "Test fixture confirms scope, validation plan and implementation readiness.",
-      persistTo: "prd",
-    });
-    if (!decision.ok) throw new Error(`seedTaskPreflight record_grill_decision failed: ${decision.summary}`);
+    for (const [decisionId, roundKind] of [[decisionIds[0], "scope"], [decisionIds[1], "runtime"], [decisionIds[2], "validation"]] as const) {
+      const decision = await workflowRun(root, {
+        action: "record_grill_decision",
+        mode: "execute",
+        task: taskId,
+        decisionId,
+        decisionSeverity: "blocking",
+        decisionSource: "user",
+        decisionSummary: `Test fixture confirms ${roundKind} readiness.`,
+        persistTo: "prd",
+        roundKind,
+      });
+      if (!decision.ok) throw new Error(`seedTaskPreflight record_grill_decision failed: ${decision.summary}`);
+    }
 
     const finalized = await workflowRun(root, {
       action: "finalize_grill",
@@ -208,7 +215,7 @@ test("workflow_next detects active planning and in-progress tasks", async () => 
   assert.ok(blockerCodes(next).includes("grill_not_finalized"));
   assert.ok(blockerCodes(next).includes("prd_todo_present"));
   assert.equal(next.adaptiveControl?.strategy, "ask_user");
-  assert.equal(next.adaptiveControl?.decisionCardHints?.[0]?.header, "Grill");
+  assert.equal(next.adaptiveControl?.decisionCardHints?.[0]?.header, "Grill Round");
 
   const blockedStartDryRun = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(blockedStartDryRun.ok, false);
@@ -317,7 +324,8 @@ test("workflow-prd-confirm engine records final confirmation without LLM", async
   const root = await mkdtemp(join(tmpdir(), "pcw-prd-confirm-"));
   await executeInitWorkspace(root, "generic");
   const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Confirm PRD", level: "complex", slug: "confirm-prd" });
-  await seedTaskPreflight(root, create.task!, { finalConfirmed: false, finishComplete: true });
+  const confirmDecisionIds = ["confirm-prd.scope", "confirm-prd.runtime", "confirm-prd.validation"];
+  await seedTaskPreflight(root, create.task!, { finalConfirmed: false, finishComplete: true, decisionIds: confirmDecisionIds });
 
   const blockedStart = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.ok(blockerCodes(blockedStart).includes("prd_final_confirmation_missing"));
@@ -334,16 +342,19 @@ test("workflow-prd-confirm engine records final confirmation without LLM", async
   const kernel = await readPrdKernel(root, { id: create.task!, title: "Confirm PRD", status: "planning", stage: "grill", flowLevel: "complex", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, "compact");
   assert.equal(kernel.finalConfirmation.confirmed, true);
 
-  const decision = await workflowRun(root, {
-    action: "record_grill_decision",
-    mode: "execute",
-    task: create.task,
-    decisionId: "confirm-prd.scope",
-    decisionSeverity: "blocking",
-    decisionSource: "ask_user_question",
-    decisionSummary: "User approved implementation after reviewing the PRD.",
-  });
-  assert.equal(decision.ok, true);
+  for (const [decisionId, roundKind] of [[confirmDecisionIds[0], "scope"], [confirmDecisionIds[1], "runtime"], [confirmDecisionIds[2], "validation"]] as const) {
+    const decision = await workflowRun(root, {
+      action: "record_grill_decision",
+      mode: "execute",
+      task: create.task,
+      decisionId,
+      decisionSeverity: "blocking",
+      decisionSource: "ask_user_question",
+      decisionSummary: `User approved ${roundKind} after reviewing the PRD.`,
+      roundKind,
+    });
+    assert.equal(decision.ok, true);
+  }
   const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "ask_user_question", notes: "User approved implementation." });
   assert.equal(finalize.ok, true);
 
@@ -357,7 +368,8 @@ test("start preflight requires finalized Stage 1 grill", async () => {
   const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Grill Gate", level: "standard", slug: "grill-gate" });
   await seedManifestFiles(root);
   const taskDir = join(root, ".workflow/tasks", create.task!);
-  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Grill Gate", { finishComplete: true }), "utf8");
+  const grillGateDecisionIds = ["grill-gate.scope", "grill-gate.runtime", "grill-gate.validation"];
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Grill Gate", { finishComplete: true, decisionIds: grillGateDecisionIds }), "utf8");
   await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
   await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
 
@@ -365,11 +377,176 @@ test("start preflight requires finalized Stage 1 grill", async () => {
   assert.equal(blocked.ok, false);
   assert.ok(blockerCodes(blocked).includes("grill_not_finalized"));
 
-  const decision = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId: "grill-gate.scope", decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "User confirmed scope and validation." });
-  assert.equal(decision.ok, true);
+  for (const [decisionId, roundKind] of [[grillGateDecisionIds[0], "scope"], [grillGateDecisionIds[1], "runtime"], [grillGateDecisionIds[2], "validation"]] as const) {
+    const decision = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId, decisionSource: "user", decisionSeverity: "blocking", decisionSummary: `User confirmed ${roundKind}.`, roundKind });
+    assert.equal(decision.ok, true);
+  }
   const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed the PRD can start." });
   assert.equal(finalize.ok, true);
 
+  const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(start.ok, true);
+});
+
+test("finalize_grill requires multiple business rounds for standard tasks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-grill-rounds-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Round Gate", level: "standard", slug: "round-gate" });
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  const decisionIds = ["round.scope", "round.runtime"];
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Round Gate", { finishComplete: true, decisionIds }), "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+
+  const batch = await workflowRun(root, {
+    action: "batch",
+    mode: "execute",
+    task: create.task,
+    actions: [
+      { action: "record_grill_decision", decisionId: decisionIds[0], decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "Scope approved.", roundKind: "scope" },
+      { action: "record_grill_decision", decisionId: decisionIds[1], decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "Runtime approved.", roundKind: "runtime" },
+    ],
+  });
+  assert.equal(batch.ok, true);
+
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed PRD." });
+  assert.equal(finalize.ok, false);
+  assert.ok(blockerCodes(finalize).includes("grill_min_rounds_not_met"));
+});
+
+test("finalize_grill rejects final confirmation mixed with business decisions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-grill-mixed-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Mixed Gate", level: "simple", slug: "mixed-gate" });
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Mixed Gate", { finishComplete: true, decisionIds: ["mixed.scope"] }), "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+
+  const batch = await workflowRun(root, {
+    action: "batch",
+    mode: "execute",
+    task: create.task,
+    actions: [
+      { action: "record_grill_decision", decisionId: "mixed.scope", decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "Scope approved.", roundKind: "scope" },
+      { action: "record_grill_decision", decisionId: "mixed.stage1-final-confirm", decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "Final confirm mixed into same ask.", roundKind: "final_confirmation" },
+    ],
+  });
+  assert.equal(batch.ok, true);
+
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed PRD." });
+  assert.equal(finalize.ok, false);
+  assert.ok(blockerCodes(finalize).includes("grill_final_confirmation_mixed_with_business_round"));
+});
+
+test("finalize_grill requires PRD update between business grill rounds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-grill-prd-between-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Between Gate", level: "standard", slug: "between-gate" });
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  const decisionIds = ["between.scope", "between.runtime"];
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Between Gate", { finishComplete: true, decisionIds: [] }), "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+
+  const scope = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId: decisionIds[0], decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "Scope approved.", roundKind: "scope" });
+  assert.equal(scope.ok, true);
+  const runtime = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId: decisionIds[1], decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "Runtime approved.", roundKind: "runtime" });
+  assert.equal(runtime.ok, true);
+
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Between Gate", { finishComplete: true, decisionIds }), "utf8");
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed PRD." });
+  assert.equal(finalize.ok, false);
+  assert.ok(blockerCodes(finalize).includes("grill_prd_revision_missing_after_round"));
+});
+
+test("finalize_grill requires business decisions to be written into PRD", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-grill-prd-log-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "PRD Log Gate", level: "complex", slug: "prd-log-gate" });
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("PRD Log Gate", { finishComplete: true, decisionIds: ["log.scope", "log.validation"] }), "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+  for (const [decisionId, roundKind] of [["log.scope", "scope"], ["log.runtime", "runtime"], ["log.validation", "validation"]] as const) {
+    const decision = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId, decisionSource: "user", decisionSeverity: "blocking", decisionSummary: `Approved ${roundKind}.`, roundKind });
+    assert.equal(decision.ok, true);
+  }
+
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed PRD." });
+  assert.equal(finalize.ok, false);
+  assert.ok(blockerCodes(finalize).includes("prd_missing_grill_decision"));
+});
+
+test("finalize_grill rejects stale PRD final confirmation hash", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-grill-stale-prd-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Stale PRD", level: "complex", slug: "stale-prd" });
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  const decisionIds = ["stale.scope", "stale.runtime", "stale.validation"];
+  await writeFile(join(taskDir, "prd.md"), `${prdMarkdown("Stale PRD", { finishComplete: true, decisionIds })}\n\n## Late Change\nThis edit happened after confirmation.\n`, "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+  for (const [decisionId, roundKind] of [[decisionIds[0], "scope"], [decisionIds[1], "runtime"], [decisionIds[2], "validation"]] as const) {
+    const decision = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId, decisionSource: "user", decisionSeverity: "blocking", decisionSummary: `Approved ${roundKind}.`, roundKind });
+    assert.equal(decision.ok, true);
+  }
+
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed PRD." });
+  assert.equal(finalize.ok, false);
+  assert.ok(blockerCodes(finalize).includes("prd_changed_after_final_confirmation"));
+});
+
+test("update_prd_section replaces and appends deterministic PRD sections", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-update-prd-section-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Update PRD", level: "standard", slug: "update-prd" });
+
+  const dryRun = await workflowRun(root, { action: "update_prd_section", mode: "dry_run", task: create.task, prdSection: "requirements", prdContent: "- R1: Deterministic PRD updates." });
+  assert.equal(dryRun.ok, true);
+  assert.equal(dryRun.mutated, false);
+
+  const replaced = await workflowRun(root, { action: "update_prd_section", mode: "execute", task: create.task, prdSection: "requirements", prdContent: "- R1: Deterministic PRD updates." });
+  assert.equal(replaced.ok, true);
+  assert.equal(replaced.mutated, true);
+
+  const appended = await workflowRun(root, { action: "update_prd_section", mode: "execute", task: create.task, prdSection: "requirements", prdUpdateMode: "append", prdContent: "- R2: Append mode preserves previous requirements." });
+  assert.equal(appended.ok, true);
+  const prd = await readFile(join(root, ".workflow/tasks", create.task!, "prd.md"), "utf8");
+  assert.match(prd, /R1: Deterministic PRD updates/);
+  assert.match(prd, /R2: Append mode preserves previous requirements/);
+});
+
+test("append_prd_decisions writes grill log and enables multi-round finalize", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-append-prd-decisions-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Append Decisions", level: "complex", slug: "append-decisions" });
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Append Decisions", { finishComplete: true, finalConfirmed: false, decisionIds: [] }), "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+
+  for (const [decisionId, roundKind] of [["append.scope", "scope"], ["append.runtime", "runtime"], ["append.validation", "validation"]] as const) {
+    const decision = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId, decisionSource: "user", decisionSeverity: "blocking", decisionSummary: `Approved ${roundKind}.`, roundKind });
+    assert.equal(decision.ok, true);
+    const dryRun = await workflowRun(root, { action: "append_prd_decisions", mode: "dry_run", task: create.task });
+    assert.equal(dryRun.ok, true);
+    assert.equal(dryRun.mutated, false);
+    const appended = await workflowRun(root, { action: "append_prd_decisions", mode: "execute", task: create.task });
+    assert.equal(appended.ok, true);
+    assert.match(await readFile(join(taskDir, "prd.md"), "utf8"), new RegExp(decisionId.replace(".", "\\.")));
+  }
+
+  const confirmed = await confirmPrdFinal(root, { task: create.task, mode: "execute", message: "User approved append decisions PRD." });
+  assert.equal(confirmed.ok, true);
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed PRD." });
+  assert.equal(finalize.ok, true);
   const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(start.ok, true);
 });
@@ -390,6 +567,9 @@ test("workflow_run batch returns envelope metadata and next recommendation", asy
   assert.equal(result.action, "batch");
   assert.equal(result.results?.length, 1);
   assert.equal(result.results?.[0].action, "create_from_grill");
+  assert.equal(result.results?.[0].meta, undefined);
+  assert.ok(result.transaction?.artifactRef?.includes(".workflow/.runtime/transactions/"));
+  assert.match(await readFile(join(root, result.transaction!.artifactRef!), "utf8"), /resultsSummary/);
   assert.equal(result.nextRecommendedCall?.name, "workflow_next");
   assert.ok((result.meta?.estimatedTokens ?? 0) > 0);
 });
@@ -472,6 +652,15 @@ test("workflow telemetry writes schema-versioned JSONL events", async () => {
   const checkpoint = JSON.parse(await readFile(join(root, checkpointResult.artifactRef!), "utf8"));
   assert.equal(checkpoint.kind, "pi-coding-workflow.checkpoint");
   assert.equal(checkpoint.schemaVersion, 1);
+});
+
+test("workflow_next emits telemetry budget warnings after repeated calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-telemetry-warn-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Telemetry Warning", level: "standard", slug: "telemetry-warning" });
+  let next = await workflowNext(root, { task: create.task, detail: "normal" });
+  for (let i = 0; i < 12; i++) next = await workflowNext(root, { task: create.task, detail: "normal" });
+  assert.ok(next.warnings.some((warning) => warning.code === "workflow_next_repeated"));
 });
 
 test("start preflight blocks missing PRD", async () => {

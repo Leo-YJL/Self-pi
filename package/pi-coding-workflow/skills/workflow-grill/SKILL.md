@@ -13,6 +13,8 @@ Use this generic skill only for active coding workflow projects using `pi-coding
 - Use `/workflow-prd-confirm` for final human confirmation instead of asking the LLM to relay confirmation text.
 - Prefer `workflow_run` for controlled workflow actions.
 - After creating a planning task, record user-sourced grill decisions with `workflow_run action=record_grill_decision` and close Stage 1 with `workflow_run action=finalize_grill`; do not run `start_checked` while the task has `grill_not_finalized`.
+- For `standard`, `complex`, and `goal` tasks, use multi-round grill: decision round → write PRD → next decision round → write PRD → final PRD confirmation. Do not compress all blocking choices into one ask.
+- Final confirmation must be a separate round after the latest PRD has been written/reviewed. Do not include a `stage1-final-confirm` / `final-confirmation` decision in the same `ask_user_question` call as business decisions.
 - Do not use deprecated prompt wrappers or legacy command aliases.
 - Keep project-specific facts in the project `.workflow/spec/**` overlay.
 - Preserve unrelated dirty files.
@@ -36,7 +38,9 @@ Ask related decisions in small groups:
 
 - 1-4 questions per `ask_user_question` call.
 - Do not ask 10+ decisions at once.
-- Split by topic, for example runtime semantics, editor behavior, table schema, validation, error handling.
+- For `standard` tasks, plan at least 2 business grill rounds before final confirmation.
+- For `complex` / `goal` tasks, plan at least 3 business grill rounds before final confirmation.
+- Split by topic, for example: Round 1 scope/out-of-scope, Round 2 runtime/error behavior, Round 3 validation/acceptance/limits.
 - Ask high-risk decisions separately if they require careful reading.
 - If later questions depend on earlier answers, wait for the first answer group before asking the next group.
 
@@ -82,9 +86,10 @@ If only the legacy ask tool is available, still follow the same decision-card wo
 ## After the user answers
 
 - Convert answers into explicit PRD decisions.
-- For `persistTo=prd`, update `.workflow/tasks/<task>/prd.md`, usually under `## Grill Result` or a `## Decisions` section.
+- When recording a round, pass `roundKind` (`scope`, `runtime`, `validation`, `final_confirmation`, or `custom`). If multiple decisions came from the same user interaction, pass the same `roundId`; `workflow_run batch` does this automatically for its child `record_grill_decision` actions.
+- For `persistTo=prd`, update `.workflow/tasks/<task>/prd.md`, usually under `## Grill Decision Log` or a `## Decisions` section, and include each `decisionId` literally so deterministic PRD coverage can be checked. Prefer `workflow_run action=append_prd_decisions` immediately after recording a business round when a simple decision log append is enough; prefer `workflow_run action=update_prd_section` for deterministic updates to Requirements, Acceptance Criteria, Validation Plan, Open Questions, Out of Scope or Definition of Done.
 - For unresolved blocking decisions, keep them under `## Open Questions` and do not run `workflow_run start_checked`.
-- Once blocking decisions and PRD final confirmation are resolved, run `workflow_run action=finalize_grill mode=dry_run` and then `mode=execute` before `start_checked`.
+- Once blocking decisions and PRD final confirmation are resolved, run `workflow_run action=finalize_grill mode=dry_run` and then `mode=execute` before `start_checked`. If finalization reports `grill_min_rounds_not_met`, `prd_missing_grill_decision`, or `prd_changed_after_final_confirmation`, return to PRD/decision updates instead of forcing start.
 - For `persistTo=spec`, update `.workflow/spec/**` only when the answer is a durable project fact, not a one-task implementation detail.
 - Re-run `workflow_next` after updating PRD/spec so blockers and adaptive control reflect the new state.
 
@@ -94,4 +99,5 @@ If only the legacy ask tool is available, still follow the same decision-card wo
 - Do not ask every possible edge case upfront; ask only decisions that affect implementation safety.
 - Do not treat “yes” as sufficient if the decision was not stated clearly in the prompt.
 - Do not bury decisions only in chat history; write durable decisions into PRD/spec as appropriate.
+- Do not mix final confirmation with business decisions in one ask round.
 - Do not force the user to choose a recommendation without showing at least one viable alternative and consequence.

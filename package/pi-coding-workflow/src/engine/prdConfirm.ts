@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { buildPrdKernelFromMarkdown, readPrdKernel } from "./prd.ts";
+import { buildPrdKernelFromMarkdown, prdConfirmationHash, readPrdKernel } from "./prd.ts";
 import { findActiveTask, readTask, type WorkflowTaskJson } from "./task.ts";
 import type { RunMode, WorkflowBlocker, WorkflowWarning } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
@@ -95,7 +95,7 @@ function blocked(mode: RunMode, code: string, message: string, task?: string, pr
 }
 
 function upsertFinalConfirmation(markdown: string, task: WorkflowTaskJson, message?: string, confirmedBy = "user"): string {
-  const body = confirmationBody(task, message, confirmedBy);
+  const body = confirmationBody(task, message, confirmedBy, markdown);
   const lines = markdown.split(/\r?\n/);
   const headingIndex = lines.findIndex((line) => /^#{1,6}\s+(.+?)\s*$/.test(line) && isFinalConfirmationHeading(line.replace(/^#{1,6}\s+/, "").trim()));
 
@@ -118,9 +118,10 @@ function upsertFinalConfirmation(markdown: string, task: WorkflowTaskJson, messa
   return ensureTrailingNewline(nextLines.join("\n"));
 }
 
-function confirmationBody(task: WorkflowTaskJson, message?: string, confirmedBy = "user"): string {
+function confirmationBody(task: WorkflowTaskJson, message?: string, confirmedBy = "user", markdown?: string): string {
   const evidence = (message ?? "").trim() || `Confirmed to proceed with task ${task.id}.`;
-  return `- Status: confirmed\n- Confirmed By: ${confirmedBy}\n- Confirmed At: ${new Date().toISOString()}\n- Evidence: ${evidence}`;
+  const hash = markdown ? prdConfirmationHash(markdown) : undefined;
+  return `- Status: confirmed\n- Confirmed By: ${confirmedBy}\n- Confirmed At: ${new Date().toISOString()}${hash ? `\n- Confirmed PRD Hash: ${hash}` : ""}\n- Evidence: ${evidence}`;
 }
 
 function isFinalConfirmationHeading(title: string): boolean {

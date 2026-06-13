@@ -111,19 +111,19 @@ function decisionCardHintsFor(input: AdaptiveInput, blockers: WorkflowBlocker[],
 
   if (needsGrill) {
     return [{
-      decisionId: `${task.id}.stage1-grill-finalize`,
+      decisionId: `${task.id}.grill-next-round`,
       severity: "blocking",
       persistTo: "prd",
-      header: "Grill",
-      question: `Can task ${task.id} enter implementation with the current PRD scope?`,
-      context: `Task is ${task.status}/${task.stage}/${task.flowLevel}; start_checked is blocked until Stage 1 grill has a user-sourced decision record and finalize_grill succeeds.`,
-      ambiguity: "Without this decision, the agent may infer scope, risk and validation choices from context instead of using an explicit user decision.",
-      recommendation: "Confirm the current PRD only if scope, out-of-scope, risks and validation limits are clear; otherwise ask one focused adjustment question first.",
-      why: "A short Decision Card produces a durable PRD decision and avoids long agent-side speculation before implementation.",
+      header: "Grill Round",
+      question: `Which next Stage 1 grill round should be resolved for task ${task.id}?`,
+      context: `Task is ${task.status}/${task.stage}/${task.flowLevel}; start_checked remains blocked until business grill rounds are recorded, written into PRD, then final confirmation is recorded after reviewing the latest PRD.`,
+      ambiguity: "If the agent jumps straight to final confirmation, standard/complex tasks may skip scope/runtime/validation decisions or fail to write decisions into PRD.",
+      recommendation: "Ask one focused business grill round, write the resulting decision ids into the PRD Grill Decision Log, then rerun workflow_next before the next round.",
+      why: "Multi-round grill keeps user decisions, PRD revisions and final confirmation auditable instead of compressing all choices into one ask.",
       options: [
-        { label: "Confirm PRD", value: "confirm_prd", recommended: true, description: "Use the current PRD as the implementation contract.", consequence: "Record a blocking grill decision, then run finalize_grill before start_checked." },
-        { label: "Adjust scope", value: "adjust_scope", description: "Change in-scope or out-of-scope boundaries before implementation.", consequence: "Update PRD decisions and ask again if a blocking ambiguity remains." },
-        { label: "Add validation", value: "add_validation", description: "Clarify required checks, environment limits or manual validation.", consequence: "Update the Validation Plan before finalize_grill." },
+        { label: "Scope round", value: "scope_round", recommended: true, description: "Clarify in-scope, out-of-scope and acceptance boundaries.", consequence: "Record decisions with roundKind=scope, update PRD, then continue." },
+        { label: "Runtime round", value: "runtime_round", description: "Clarify runtime behavior, fallback, errors or environment differences.", consequence: "Record decisions with roundKind=runtime and update PRD before final confirmation." },
+        { label: "Validation round", value: "validation_round", description: "Clarify checks, manual validation limits and Definition of Done.", consequence: "Record decisions with roundKind=validation and update PRD before final confirmation." },
       ],
     }];
   }

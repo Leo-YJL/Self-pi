@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readdir, stat } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { WorkflowNextOutput, WorkflowRunOutput } from "../types.ts";
+import type { WorkflowNextOutput, WorkflowRunOutput, WorkflowWarning } from "../types.ts";
 import { normalizeSlash, resolveInsideRoot } from "../safety/pathPolicy.ts";
 
 const TELEMETRY_SCHEMA_VERSION = 1;
@@ -43,6 +43,30 @@ export interface WorkflowTelemetryWriteResult {
   error?: string;
 }
 
+export interface WorkflowTelemetrySummary {
+  task?: string;
+  workflowNextCount: number;
+  workflowRunCount: number;
+  estimatedTokens: number;
+  warnings: WorkflowWarning[];
+}
+
+const WARN_WORKFLOW_NEXT_COUNT = 12;
+const WARN_WORKFLOW_RUN_COUNT = 24;
+const WARN_ESTIMATED_TOKENS = 80_000;
+
+export async function readWorkflowTelemetrySummary(root: string, task?: string): Promise<WorkflowTelemetrySummary> {
+  const events = await readRecentTelemetryEvents(root, task);
+  const workflowNextCount = events.filter((event) => event.event === "workflow_next").length;
+  const workflowRunCount = events.filter((event) => event.event === "workflow_run").length;
+  const estimatedTokens = events.reduce((sum, event) => sum + (Number.isFinite(event.estimatedTokens) ? event.estimatedTokens ?? 0 : 0), 0);
+  const warnings: WorkflowWarning[] = [];
+  if (workflowNextCount >= WARN_WORKFLOW_NEXT_COUNT) warnings.push({ code: "workflow_next_repeated", message: `workflow_next has been called ${workflowNextCount} time(s) for ${task ?? "this workspace"}; consider batching deterministic steps or using cached evidence refs.` });
+  if (workflowRunCount >= WARN_WORKFLOW_RUN_COUNT) warnings.push({ code: "workflow_run_repeated", message: `workflow_run has been called ${workflowRunCount} time(s) for ${task ?? "this workspace"}; consider combining deterministic actions with batch.` });
+  if (estimatedTokens >= WARN_ESTIMATED_TOKENS) warnings.push({ code: "workflow_estimated_tokens_high", message: `Workflow telemetry estimated ${estimatedTokens} tokens for ${task ?? "this workspace"}; consider compaction or a fresh task/session.` });
+  return { task, workflowNextCount, workflowRunCount, estimatedTokens, warnings };
+}
+
 export async function writeWorkflowTelemetry(root: string, event: WorkflowTelemetryEventName, output: WorkflowNextOutput | WorkflowRunOutput): Promise<WorkflowTelemetryWriteResult> {
   try {
     if (!existsSync(resolveInsideRoot(root, ".workflow"))) {
@@ -58,6 +82,37 @@ export async function writeWorkflowTelemetry(root: string, event: WorkflowTeleme
     return { ok: true, artifactRef, bytes: Buffer.byteLength(line, "utf8") };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function readRecentTelemetryEvents(root: string, task?: string): Promise<WorkflowTelemetryEvent[]> {
+  try {
+    const dir = ".workflow/.runtime/telemetry";
+    const absDir = resolveInsideRoot(root, dir);
+    if (!existsSync(absDir)) return [];
+    const entries = await readdir(absDir, { withFileTypes: true });
+    const files = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+      .map((entry) => normalizeSlash(`${dir}/${entry.name}`))
+      .sort()
+      .slice(-6);
+    const events: WorkflowTelemetryEvent[] = [];
+    for (const file of files) {
+      const text = await readFile(resolveInsideRoot(root, file), "utf8");
+      for (const line of text.split(/\r?\n/).filter(Boolean)) {
+        try {
+          const event = JSON.parse(line) as WorkflowTelemetryEvent;
+          if (event.kind !== "pi-coding-workflow.telemetry") continue;
+          if (task && event.task !== task) continue;
+          events.push(event);
+        } catch {
+          // Ignore malformed runtime telemetry lines.
+        }
+      }
+    }
+    return events;
+  } catch {
+    return [];
   }
 }
 

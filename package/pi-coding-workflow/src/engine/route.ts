@@ -6,7 +6,7 @@ import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 import { buildContextBundle, type WorkflowContextBundle } from "./contextBundle.ts";
 import { contextBudgetPolicy, estimateTokens, omitted, tokenBudget, truncateText } from "./contextBudget.ts";
 import { computeWorkflowNextCacheKey, readWorkflowNextCache, writeWorkflowNextCache } from "./cache.ts";
-import { writeWorkflowTelemetry } from "./telemetry.ts";
+import { readWorkflowTelemetrySummary, writeWorkflowTelemetry } from "./telemetry.ts";
 import { buildAdaptiveControl, compactAdaptiveControl } from "./adaptive.ts";
 import { isGrillFinalized } from "./grill.ts";
 
@@ -61,6 +61,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   }
 
   const bundle = includeContext === "none" ? null : await buildContextBundle(root, task, { mode: includeContext, agent: input.agent, profile, detail: input.detail });
+  const telemetrySummary = await readWorkflowTelemetrySummary(root, task.id);
   const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent })) : undefined;
   const context = bundle ? contextFromBundle(bundle, input.detail, adaptiveControl) : undefined;
   const output: WorkflowNextOutput = {
@@ -72,7 +73,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     nextAction: next.nextAction,
     recommendedTool: next.recommendedTool,
     blockedBy: bundle?.blockedBy ?? [],
-    warnings: bundle?.warnings ?? [],
+    warnings: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings],
     context,
     evidenceRefs: context?.evidenceRefs,
     omitted: context?.omitted,
@@ -249,7 +250,7 @@ function finalizeNext(output: WorkflowNextOutput, startedAt: number): WorkflowNe
 function nextActionForTask(task: WorkflowTaskJson, agent: WorkflowNextInput["agent"]): Pick<WorkflowNextOutput, "nextAction" | "recommendedTool"> {
   if (task.status === "planning") {
     if (!isGrillFinalized(task)) {
-      return { nextAction: "ask_user", recommendedTool: { name: "workflow_run", arguments: { action: "finalize_grill", mode: "dry_run", task: task.id } } };
+      return { nextAction: "ask_user" };
     }
     return { nextAction: "start_checked", recommendedTool: { name: "workflow_run", arguments: { action: "start_checked", mode: "dry_run", task: task.id } } };
   }

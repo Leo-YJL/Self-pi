@@ -133,6 +133,8 @@ export type WorkflowGrillDecisionStatus = "answered" | "unanswered" | "skipped";
 export type WorkflowGrillDecisionSource = "ask_user_question" | "user" | "command" | "fast_path" | "agent";
 export type WorkflowGrillStatus = "not_started" | "in_progress" | "finalized";
 
+export type WorkflowGrillRoundKind = "scope" | "runtime" | "validation" | "final_confirmation" | "custom";
+
 export interface WorkflowGrillDecision {
   id: string;
   severity: WorkflowGrillDecisionSeverity;
@@ -140,21 +142,45 @@ export interface WorkflowGrillDecision {
   source: WorkflowGrillDecisionSource;
   summary: string;
   persistTo?: "prd" | "spec" | "none";
+  /** User interaction round that produced this decision. Decisions sharing a roundId count as one grill round. */
+  roundId?: string;
+  /** Coarse purpose of the grill round, used by deterministic finalization gates. */
+  roundKind?: WorkflowGrillRoundKind;
+  createdAt: string;
+}
+
+export interface WorkflowGrillRound {
+  id: string;
+  kind: WorkflowGrillRoundKind;
+  decisionIds: string[];
+  questionCount: number;
+  prdHashBefore?: string;
+  prdHashAfter?: string;
+  prdDecisionIdsBefore?: string[];
+  prdUpdated: boolean;
   createdAt: string;
 }
 
 export interface WorkflowGrillState {
   status: WorkflowGrillStatus;
+  /** Deprecated compatibility field. Prefer askRounds/decisionCount for new logic. */
   rounds: number;
+  decisionCount: number;
+  askRounds: number;
+  prdRevisionCount: number;
   decisions: WorkflowGrillDecision[];
+  roundLog: WorkflowGrillRound[];
   blockingOpenDecisions: number;
   finalConfirmed: boolean;
   finalConfirmedBy?: WorkflowGrillDecisionSource;
+  finalConfirmedAt?: string;
+  finalConfirmedPrdHash?: string;
   finalizedAt?: string;
 }
 
-export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "batch";
+export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "append_prd_decisions" | "update_prd_section" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "batch";
 export type WorkflowRunSingleAction = Exclude<WorkflowRunAction, "batch">;
+export type WorkflowPrdUpdateMode = "replace" | "append";
 
 export interface WorkflowRunBatchItem {
   action: WorkflowRunSingleAction;
@@ -176,6 +202,12 @@ export interface WorkflowRunBatchItem {
   decisionSource?: WorkflowGrillDecisionSource;
   decisionSummary?: string;
   persistTo?: "prd" | "spec" | "none";
+  roundId?: string;
+  roundKind?: WorkflowGrillRoundKind;
+  questionCount?: number;
+  prdSection?: string;
+  prdContent?: string;
+  prdUpdateMode?: WorkflowPrdUpdateMode;
 }
 
 export interface WorkflowRunInput {
@@ -198,6 +230,16 @@ export interface WorkflowRunInput {
   decisionSource?: WorkflowGrillDecisionSource;
   decisionSummary?: string;
   persistTo?: "prd" | "spec" | "none";
+  roundId?: string;
+  roundKind?: WorkflowGrillRoundKind;
+  questionCount?: number;
+  prdSection?: string;
+  prdContent?: string;
+  prdUpdateMode?: WorkflowPrdUpdateMode;
+  /** Internal evidence captured by workflow_run before recording a decision. */
+  prdHashBefore?: string;
+  /** Internal evidence captured by workflow_run before recording a decision. */
+  prdDecisionIdsBefore?: string[];
   actions?: WorkflowRunBatchItem[];
 }
 

@@ -81,6 +81,8 @@ npm install @leo-yjl/pi-coding-workflow
 create_from_grill
 create_child
 record_grill_decision
+append_prd_decisions
+update_prd_section
 finalize_grill
 start_checked
 checkpoint
@@ -94,9 +96,13 @@ batch
 - 默认 `mode: "dry_run"`。
 - 默认 `detail: "lite"`；`start_checked` / `finish_run` / `checkpoint` 的完整 preflight details 会写入 `.workflow/.runtime/preflight/*.json`，工具结果只返回 `preflightRef`。需要内联详情时显式传 `detail: "summary"` 或 `detail: "full"`。
 - 修改 task 状态需要 `mode: "execute"`。
-- `record_grill_decision` / `finalize_grill` 记录并收口 Stage 1 grill；所有未 finalized 的 planning task 会被 `start_checked` 阻止，standard/complex/goal 还要求用户来源的决策记录。
+- `record_grill_decision` / `finalize_grill` 记录并收口 Stage 1 grill；所有未 finalized 的 planning task 会被 `start_checked` 阻止。
+- Stage 1 grill 现在区分 `decisionCount` 与 `askRounds`：同一轮用户问答产生的多个 decision 应共享 `roundId`，`batch` 中未显式传 `roundId` 的 `record_grill_decision` 会被视为同一轮。
+- `append_prd_decisions` 会把已记录但尚未写入 PRD 的业务 decision 追加到 `## Grill Decision Log`，用于确定性固化 “grill → 写 PRD” 步骤。
+- `update_prd_section` 可确定性 replace/append 指定 PRD section（如 Requirements、Acceptance Criteria、Validation Plan、Open Questions），减少手工 edit 风险。
+- `standard` 任务至少需要 2 个业务 grill round，`complex` / `goal` 至少需要 3 个；每个业务轮次后要先更新 PRD，业务决策必须写入 PRD 的 `Grill Decision Log`，最终确认必须单独发生在最新 PRD 上。
 - `start_checked` 和 `finish_run` 会执行确定性 preflight。
-- `batch` 可顺序执行多个动作，并返回 transaction、artifact 和 rollback hints。
+- `batch` 可顺序执行多个动作，并返回 transaction、artifact 和 rollback hints；默认结果会压缩，完整 child results 写入 `.workflow/.runtime/transactions/*.json`，需要内联完整结果时传 `detail: "full"`。
 
 ## Pi 命令
 
@@ -125,7 +131,7 @@ batch
 - 提取 PRD kernel。
 - 检测 TODO / TBD。
 - 检测阻塞性开放问题。
-- 检测最终确认 gate。
+- 检测最终确认 gate，并通过 `Confirmed PRD Hash` 防止确认后修改 PRD。
 - 检查 Acceptance Criteria、Validation Plan、Definition of Done。
 - 校验 `implement.jsonl` / `check.jsonl`。
 - 执行 checkpoint，例如 `git diff --check`。
@@ -139,6 +145,7 @@ batch
 - `tokenBudget`
 - `meta`
 - fingerprint-backed workflow cache
+- telemetry warnings for repeated `workflow_next` / `workflow_run` calls and high estimated token usage
 
 ### Adaptive Control
 
@@ -315,6 +322,8 @@ Supported actions:
 create_from_grill
 create_child
 record_grill_decision
+append_prd_decisions
+update_prd_section
 finalize_grill
 start_checked
 checkpoint
@@ -328,9 +337,13 @@ Rules:
 - Defaults to `mode: "dry_run"`.
 - Defaults to `detail: "lite"`; full preflight details for `start_checked` / `finish_run` / `checkpoint` are written to `.workflow/.runtime/preflight/*.json` and returned as `preflightRef`. Pass `detail: "summary"` or `detail: "full"` when inline details are needed.
 - Task mutations require `mode: "execute"`.
-- `record_grill_decision` / `finalize_grill` record and close Stage 1 grill; `start_checked` blocks any planning task that is not finalized, and standard/complex/goal tasks also require a user-sourced decision log.
+- `record_grill_decision` / `finalize_grill` record and close Stage 1 grill; `start_checked` blocks any planning task that is not finalized.
+- Stage 1 grill now separates `decisionCount` from `askRounds`: multiple decisions from the same user interaction should share `roundId`; `record_grill_decision` items inside one `batch` share a round by default when no explicit `roundId` is provided.
+- `append_prd_decisions` appends recorded business decisions that are still missing from the PRD into `## Grill Decision Log`, making the “grill → write PRD” step deterministic.
+- `update_prd_section` deterministically replaces/appends a target PRD section such as Requirements, Acceptance Criteria, Validation Plan or Open Questions, reducing manual edit risk.
+- `standard` tasks require at least 2 business grill rounds, while `complex` / `goal` require at least 3; the PRD must be updated after each business round, business decisions must appear in the PRD `Grill Decision Log`, and final confirmation must be separate and tied to the latest PRD.
 - `start_checked` and `finish_run` run deterministic preflight checks first.
-- `batch` runs multiple actions in order and returns transaction artifacts plus rollback hints.
+- `batch` runs multiple actions in order and returns transaction artifacts plus rollback hints; by default child results are compacted and full results are written to `.workflow/.runtime/transactions/*.json`; pass `detail: "full"` when inline full results are needed.
 
 ## Pi commands
 
@@ -359,7 +372,7 @@ The engine supports:
 - extracting the PRD kernel
 - detecting TODO / TBD markers
 - detecting blocking open questions
-- detecting the final confirmation gate
+- detecting the final confirmation gate and using `Confirmed PRD Hash` to invalidate stale confirmations after PRD edits
 - checking Acceptance Criteria, Validation Plan and Definition of Done
 - validating `implement.jsonl` and `check.jsonl`
 - running checkpoints such as `git diff --check`
@@ -373,6 +386,7 @@ The engine supports:
 - `tokenBudget`
 - `meta`
 - fingerprint-backed workflow cache
+- telemetry warnings for repeated `workflow_next` / `workflow_run` calls and high estimated token usage
 
 ### Adaptive Control
 

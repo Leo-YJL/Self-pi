@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import type { WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
 import { createTask, findActiveTask, readTask, slugify, todayPrefix, writeTask, type WorkflowTaskJson } from "./task.ts";
 import { checkpoint } from "./checkpoint.ts";
@@ -6,7 +8,11 @@ import { validateTask } from "./validate.ts";
 import { estimateTokens, RUN_RESULT_TARGET_TOKENS } from "./contextBudget.ts";
 import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
 import { writeWorkflowTelemetry } from "./telemetry.ts";
-import { appendGrillDecision, finalizeGrillState, validateGrillFinalization } from "./grill.ts";
+import { appendGrillDecision, finalizeGrillState, refreshGrillPrdCoverage, validateGrillFinalization } from "./grill.ts";
+import { appendPrdDecisionLog, readPrdKernel, updatePrdSection, type PrdSectionKey } from "./prd.ts";
+import { resolveInsideRoot } from "../safety/pathPolicy.ts";
+
+const PRD_SECTION_KEYS = new Set<PrdSectionKey>(["executionContract", "goal", "requirements", "acceptanceCriteria", "validationPlan", "openQuestions", "finalConfirmation", "outOfScope", "definitionOfDone", "grillResult", "architectureImpact"]);
 
 export async function workflowRun(root: string, input: WorkflowRunInput): Promise<WorkflowRunOutput> {
   const startedAt = Date.now();
@@ -27,6 +33,8 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
 
     const transactionId = makeTransactionId();
     const plannedActions = input.actions.map((item, index) => plannedAction(item, input, mode, index));
+    const batchDecisionRoundId = input.roundId ?? `batch-${transactionId}`;
+    const batchDecisionCount = input.actions.filter((item) => item.action === "record_grill_decision").length;
     const results: WorkflowRunOutput[] = [];
     const rollbackHints: WorkflowRollbackHint[] = [];
     let mutated = false;
@@ -39,6 +47,9 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
         mode: mode === "dry_run" ? "dry_run" : item.mode ?? "execute",
         task: item.task ?? input.task,
         detail: item.detail ?? input.detail ?? "lite",
+        roundId: item.roundId ?? (item.action === "record_grill_decision" ? batchDecisionRoundId : input.roundId),
+        roundKind: item.roundKind ?? input.roundKind,
+        questionCount: item.questionCount ?? (item.action === "record_grill_decision" && batchDecisionCount > 0 ? batchDecisionCount : input.questionCount),
       } as WorkflowRunInput;
       const beforeTask = childInput.mode === "execute" ? await taskSnapshotForRollback(root, childInput) : null;
       const childStartedAt = Date.now();
@@ -63,6 +74,7 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
           warnings: child.warnings,
           summary: `Batch stopped at action ${results.length}/${input.actions.length} (${item.action}): ${child.summary}`,
           nextAction: child.nextAction ?? "fix",
+          detail: input.detail ?? "lite",
         });
       }
     }
@@ -83,6 +95,7 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
       warnings: results.flatMap((result) => result.warnings),
       summary: mode === "execute" ? `Batch transaction ${transactionId} executed ${results.length} action(s).` : `Batch dry-run planned ${results.length} action(s).`,
       nextAction: last?.nextAction ?? "continue",
+      detail: input.detail ?? "lite",
     });
   }
 
@@ -110,9 +123,61 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     const summary = (input.decisionSummary ?? input.message ?? input.notes ?? "").trim();
     if (!summary) return blocked(action, mode, "missing_decision_summary", "record_grill_decision requires decisionSummary, message or notes.");
     if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run record_grill_decision; would record ${input.decisionId} for ${task.id}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_record_grill_decision" };
-    const decision = appendGrillDecision(task, input);
+    const prdBefore = await readPrdKernel(root, task, "compact");
+    const decision = appendGrillDecision(task, {
+      ...input,
+      prdHashBefore: prdBefore.source.confirmationHash ?? prdBefore.source.hash,
+      prdDecisionIdsBefore: prdBefore.decisions.presentDecisionIds,
+    });
     await writeTask(root, task);
     return { ...ok(action, mode, true, `Recorded grill decision ${decision.id} for ${task.id}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "continue_grill_or_finalize" };
+  }
+
+  if (action === "update_prd_section") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "update_prd_section requires task or an active task.");
+    if (task.status === "completed") return blocked(action, mode, "task_completed", "update_prd_section cannot mutate a completed task PRD.");
+    const section = input.prdSection as PrdSectionKey | undefined;
+    if (!section || !PRD_SECTION_KEYS.has(section)) return blocked(action, mode, "missing_prd_section", "update_prd_section requires prdSection.");
+    const content = (input.prdContent ?? input.message ?? input.notes ?? "").trim();
+    if (!content) return blocked(action, mode, "missing_prd_content", "update_prd_section requires prdContent, message or notes.");
+    const prdPath = `.workflow/tasks/${task.id}/prd.md`;
+    const absPrdPath = resolveInsideRoot(root, prdPath);
+    if (!existsSync(absPrdPath)) return blocked(action, mode, "prd_missing", `${prdPath} is missing.`);
+    const markdown = await readFile(absPrdPath, "utf8");
+    const updated = updatePrdSection(markdown, section, content, input.prdUpdateMode ?? "replace");
+    const summary = updated.changed
+      ? `${input.prdUpdateMode ?? "replace"} PRD section ${section}.`
+      : `PRD section ${section} already matches requested content.`;
+    if (mode !== "execute") {
+      return { ...ok(action, mode, false, `Dry-run ${summary}`), task: task.id, status: task.status, stage: task.stage, nextAction: updated.changed ? "execute_update_prd_section" : "continue" };
+    }
+    if (updated.changed) await writeFile(absPrdPath, updated.markdown, "utf8");
+    return { ...ok(action, mode, updated.changed, summary), task: task.id, status: task.status, stage: task.stage, nextAction: "continue" };
+  }
+
+  if (action === "append_prd_decisions") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "append_prd_decisions requires task or an active planning task.");
+    if (task.status !== "planning" || task.stage !== "grill") return blocked(action, mode, "task_not_planning", `append_prd_decisions requires planning/grill, got ${task.status}/${task.stage}.`);
+    const prdPath = `.workflow/tasks/${task.id}/prd.md`;
+    const absPrdPath = resolveInsideRoot(root, prdPath);
+    if (!existsSync(absPrdPath)) return blocked(action, mode, "prd_missing", `${prdPath} is missing.`);
+    const markdown = await readFile(absPrdPath, "utf8");
+    const allDecisions = task.grill?.decisions ?? [];
+    const decisions = input.roundId ? allDecisions.filter((decision) => decision.roundId === input.roundId) : allDecisions;
+    const appended = appendPrdDecisionLog(markdown, decisions);
+    const summary = appended.changed
+      ? `Append ${appended.appendedDecisionIds.length} PRD grill decision(s): ${appended.appendedDecisionIds.join(", ")}.`
+      : "No missing PRD grill decisions to append.";
+    if (mode !== "execute") {
+      return { ...ok(action, mode, false, `Dry-run ${summary}`), task: task.id, status: task.status, stage: task.stage, nextAction: appended.changed ? "execute_append_prd_decisions" : "continue_grill_or_finalize" };
+    }
+    if (appended.changed) await writeFile(absPrdPath, appended.markdown, "utf8");
+    const prdAfter = await readPrdKernel(root, task, "compact");
+    refreshGrillPrdCoverage(task, prdAfter.decisions.presentDecisionIds, prdAfter.source.confirmationHash ?? prdAfter.source.hash);
+    await writeTask(root, task);
+    return { ...ok(action, mode, appended.changed, summary), task: task.id, status: task.status, stage: task.stage, nextAction: "continue_grill_or_finalize" };
   }
 
   if (action === "finalize_grill") {
@@ -196,6 +261,7 @@ interface FinishBatchOptions {
   warnings: WorkflowRunOutput["warnings"];
   summary: string;
   nextAction: string;
+  detail?: WorkflowRunInput["detail"];
 }
 
 async function finishBatch(root: string, options: FinishBatchOptions): Promise<WorkflowRunOutput> {
@@ -208,22 +274,13 @@ async function finishBatch(root: string, options: FinishBatchOptions): Promise<W
     artifactRef: undefined,
   };
   const artifacts = [];
+  const compactResults = (options.detail ?? "lite") !== "full";
 
-  if (options.mode === "execute" || options.mutated) {
+  if (compactResults || options.mode === "execute" || options.mutated) {
     const artifact = await writeJsonArtifact(root, "transactions", {
       transaction,
-      results: options.results.map((result) => ({
-        ok: result.ok,
-        action: result.action,
-        mode: result.mode,
-        task: result.task,
-        status: result.status,
-        stage: result.stage,
-        summary: result.summary,
-        blockedBy: result.blockedBy,
-        warnings: result.warnings,
-        artifactRef: result.artifactRef,
-      })),
+      results: options.results,
+      resultsSummary: options.results.map(compactBatchChildResult),
       createdAt: new Date().toISOString(),
     }, options.transactionId);
     transaction.artifactRef = artifact.artifactRef;
@@ -241,11 +298,32 @@ async function finishBatch(root: string, options: FinishBatchOptions): Promise<W
     blockedBy: options.blockedBy,
     warnings: options.warnings,
     summary: options.summary,
-    results: options.results,
+    results: compactResults ? options.results.map(compactBatchChildResult) : options.results,
     transaction,
     rollbackHints: options.rollbackHints,
     artifacts,
     nextAction: options.nextAction,
+  };
+}
+
+function compactBatchChildResult(result: WorkflowRunOutput): WorkflowRunOutput {
+  return {
+    ok: result.ok,
+    mutated: result.mutated,
+    action: result.action,
+    mode: result.mode,
+    task: result.task,
+    status: result.status,
+    stage: result.stage,
+    nextAction: result.nextAction,
+    blockedBy: result.blockedBy,
+    warnings: result.warnings,
+    summary: result.summary,
+    artifactRef: result.artifactRef,
+    artifacts: result.artifacts,
+    checkpointId: result.checkpointId,
+    preflightRef: result.preflightRef,
+    git: result.git,
   };
 }
 
@@ -269,7 +347,7 @@ function plannedAction(item: WorkflowRunBatchItem, input: WorkflowRunInput, mode
 async function taskSnapshotForRollback(root: string, input: WorkflowRunInput): Promise<WorkflowTaskJson | null> {
   try {
     if (input.task) return await readTask(root, input.task);
-    if (input.action === "record_grill_decision" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") return await findActiveTask(root);
+    if (input.action === "record_grill_decision" || input.action === "append_prd_decisions" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") return await findActiveTask(root);
   } catch {
     return null;
   }
@@ -287,17 +365,28 @@ function rollbackHintsFor(index: number, input: WorkflowRunInput, output: Workfl
       summary: `Remove .workflow/tasks/${output.task} if this created task should be rolled back.`,
     }];
   }
-  if ((input.action === "record_grill_decision" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") && beforeTask) {
-    return [{
+
+  const hints: WorkflowRollbackHint[] = [];
+  if ((input.action === "append_prd_decisions" || input.action === "update_prd_section") && output.task) {
+    hints.push({
+      actionIndex: index,
+      action: input.action,
+      kind: "manual",
+      path: `.workflow/tasks/${output.task}/prd.md`,
+      summary: `Review git diff or transaction artifact to revert PRD changes for ${output.task}.`,
+    });
+  }
+  if ((input.action === "record_grill_decision" || input.action === "append_prd_decisions" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") && beforeTask) {
+    hints.push({
       actionIndex: index,
       action: input.action,
       kind: "restore_task_json",
       path: `.workflow/tasks/${beforeTask.id}/task.json`,
       summary: `Restore task ${beforeTask.id} to ${beforeTask.status}/${beforeTask.stage}.`,
       data: { status: beforeTask.status, stage: beforeTask.stage, grill: beforeTask.grill, updatedAt: beforeTask.updatedAt },
-    }];
+    });
   }
-  return [];
+  return hints;
 }
 
 async function resolveTask(root: string, id?: string): Promise<WorkflowTaskJson | null> {

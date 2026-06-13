@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import type { WorkflowBlocker, WorkflowStage } from "../types.ts";
+import type { WorkflowBlocker, WorkflowGrillDecision, WorkflowStage } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 import type { WorkflowTaskJson } from "./task.ts";
 
@@ -49,17 +49,18 @@ export interface PrdKernel {
   mode: PrdViewMode;
   title: string;
   task: { id: string; status: string; stage: WorkflowStage; flowLevel: string };
-  source: { path: string; exists: boolean; hash?: string; mtime?: string; bytes?: number };
+  source: { path: string; exists: boolean; hash?: string; confirmationHash?: string; mtime?: string; bytes?: number };
   executionContract: { fields: Record<string, string>; raw: string };
   goal: string;
   requirements: string;
   acceptanceCriteria: string;
   validationPlan: string;
   openQuestions: { found: boolean; blocking: boolean; items: string[]; summary: string };
-  finalConfirmation: { confirmed: boolean; evidence?: string; found: boolean };
+  finalConfirmation: { confirmed: boolean; evidence?: string; found: boolean; confirmedPrdHash?: string };
   outOfScope: string;
   definitionOfDone: string;
   sections: Record<PrdSectionKey, PrdSection>;
+  decisions: { presentDecisionIds: string[]; missingDecisionIds: string[] };
   quality: {
     hasTodo: boolean;
     todoLines: Array<{ line: number; text: string }>;
@@ -170,7 +171,7 @@ export function buildPrdKernelFromMarkdown(
     mode,
     title,
     task: { id: task.id, status: task.status, stage: task.stage, flowLevel: task.flowLevel },
-    source: { path: relPath, exists: true, ...sourceMeta },
+    source: { path: relPath, exists: true, confirmationHash: prdConfirmationHash(markdown), ...sourceMeta },
     executionContract: { fields: executionFields, raw: sections.executionContract.body },
     goal: sections.goal.body,
     requirements: sections.requirements.body,
@@ -181,6 +182,7 @@ export function buildPrdKernelFromMarkdown(
     outOfScope: sections.outOfScope.body,
     definitionOfDone: sections.definitionOfDone.body,
     sections,
+    decisions: analyzePrdDecisionCoverage(task, markdown),
     quality: {
       hasTodo: todoLines.length > 0,
       todoLines: todoLines.slice(0, 20),
@@ -263,6 +265,113 @@ export function prdGateToBlocker(gate: PrdChecklistGateResult): WorkflowBlocker 
   return { code: gate.code, message: gate.message, severity: "blocking", path: gate.path };
 }
 
+export interface AppendPrdDecisionLogResult {
+  markdown: string;
+  changed: boolean;
+  appendedDecisionIds: string[];
+  alreadyPresentDecisionIds: string[];
+  preview: string;
+}
+
+export type PrdUpdateMode = "replace" | "append";
+
+export interface UpdatePrdSectionResult {
+  markdown: string;
+  changed: boolean;
+  section: PrdSectionKey;
+  mode: PrdUpdateMode;
+  existed: boolean;
+  preview: string;
+}
+
+export function prdConfirmationHash(markdown: string): string {
+  return createHash("sha256").update(`${stripFinalConfirmationSection(markdown).trim()}\n`).digest("hex").slice(0, 16);
+}
+
+export function updatePrdSection(markdown: string, section: PrdSectionKey, content: string, mode: PrdUpdateMode = "replace"): UpdatePrdSectionResult {
+  const body = content.trim();
+  const lines = markdown.replace(/\s+$/g, "").split(/\r?\n/);
+  const headings = collectHeadings(lines);
+  const heading = headings.find((candidate) => SECTION_MATCHERS[section].some((matcher) => matcher.test(candidate.title.trim())));
+  const label = SECTION_LABELS[section];
+  let nextLines: string[];
+  let existed = false;
+
+  if (heading) {
+    existed = true;
+    const nextHeading = headings.find((candidate) => candidate.lineIndex > heading.lineIndex && candidate.level <= heading.level);
+    const endLine = nextHeading ? nextHeading.lineIndex : lines.length;
+    const currentBody = lines.slice(heading.lineIndex + 1, endLine).join("\n").trim();
+    const nextBody = mode === "append" && currentBody ? `${currentBody}\n\n${body}` : body;
+    nextLines = [...lines.slice(0, heading.lineIndex + 1), "", ...nextBody.split(/\r?\n/), "", ...lines.slice(endLine)];
+  } else {
+    const finalHeading = headings.find((candidate) => SECTION_MATCHERS.finalConfirmation.some((matcher) => matcher.test(candidate.title.trim())));
+    const insertAt = section === "finalConfirmation" ? lines.length : finalHeading?.lineIndex ?? lines.length;
+    nextLines = [...lines.slice(0, insertAt), `## ${label}`, "", ...body.split(/\r?\n/), "", ...lines.slice(insertAt)];
+  }
+
+  const nextMarkdown = `${nextLines.join("\n").replace(/\s+$/g, "")}\n`;
+  return {
+    markdown: nextMarkdown,
+    changed: nextMarkdown !== `${markdown.replace(/\s+$/g, "")}\n`,
+    section,
+    mode,
+    existed,
+    preview: [`## ${label}`, "", ...body.split(/\r?\n/).slice(0, 12)].join("\n"),
+  };
+}
+
+export function appendPrdDecisionLog(markdown: string, decisions: WorkflowGrillDecision[]): AppendPrdDecisionLogResult {
+  const eligible = decisions.filter((decision) =>
+    decision.status === "answered"
+    && (decision.persistTo ?? "prd") === "prd"
+    && !isFinalConfirmationDecisionId(decision.id)
+  );
+  const alreadyPresentDecisionIds = eligible.filter((decision) => markdown.includes(decision.id)).map((decision) => decision.id);
+  const missing = eligible.filter((decision) => !alreadyPresentDecisionIds.includes(decision.id));
+  if (missing.length === 0) {
+    return { markdown, changed: false, appendedDecisionIds: [], alreadyPresentDecisionIds, preview: "No missing PRD grill decisions." };
+  }
+
+  const rows = missing.map((decision) => `| ${escapeTableCell(decision.roundId ?? "")} | ${escapeTableCell(decision.roundKind ?? "custom")} | \`${escapeTableCell(decision.id)}\` | ${escapeTableCell(decision.severity)} | ${escapeTableCell(decision.summary)} |`);
+  const table = ["| Round | Kind | Decision ID | Severity | Summary |", "|---|---|---|---|---|", ...rows].join("\n");
+  const lines = markdown.replace(/\s+$/g, "").split(/\r?\n/);
+  const headings = collectHeadings(lines);
+  const existing = headings.find((heading) => /^(grill decision log|decisions?)$/i.test(heading.title.trim()) || /grill.*decision/i.test(heading.title));
+  let nextMarkdown: string;
+
+  if (existing) {
+    const nextHeading = headings.find((candidate) => candidate.lineIndex > existing.lineIndex && candidate.level <= existing.level);
+    const endLine = nextHeading ? nextHeading.lineIndex : lines.length;
+    const body = lines.slice(existing.lineIndex + 1, endLine).join("\n");
+    const insertion = /Decision\s+ID/i.test(body) ? rows.join("\n") : table;
+    nextMarkdown = [...lines.slice(0, endLine), "", insertion, ...lines.slice(endLine)].join("\n");
+  } else {
+    const finalHeading = headings.find((heading) => SECTION_MATCHERS.finalConfirmation.some((matcher) => matcher.test(heading.title.trim())));
+    const insertAt = finalHeading?.lineIndex ?? lines.length;
+    const section = ["## Grill Decision Log", "", table, ""];
+    nextMarkdown = [...lines.slice(0, insertAt), ...section, ...lines.slice(insertAt)].join("\n");
+  }
+
+  return {
+    markdown: `${nextMarkdown.replace(/\s+$/g, "")}\n`,
+    changed: true,
+    appendedDecisionIds: missing.map((decision) => decision.id),
+    alreadyPresentDecisionIds,
+    preview: rows.join("\n"),
+  };
+}
+
+function stripFinalConfirmationSection(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const headings = collectHeadings(lines);
+  const heading = headings.find((candidate) => SECTION_MATCHERS.finalConfirmation.some((matcher) => matcher.test(candidate.title.trim())));
+  if (!heading) return markdown;
+  const nextHeading = headings.find((candidate) => candidate.lineIndex > heading.lineIndex && candidate.level <= heading.level);
+  const endLine = nextHeading ? nextHeading.lineIndex : lines.length;
+  return [...lines.slice(0, heading.lineIndex), ...lines.slice(endLine)].join("\n");
+}
+
 function emptyPrdKernel(task: WorkflowTaskJson, relPath: string, mode: PrdViewMode, summary: string): PrdKernel {
   const sections = Object.fromEntries(
     (Object.keys(SECTION_MATCHERS) as PrdSectionKey[]).map((key) => [key, emptySection(key)]),
@@ -282,6 +391,7 @@ function emptyPrdKernel(task: WorkflowTaskJson, relPath: string, mode: PrdViewMo
     outOfScope: "",
     definitionOfDone: "",
     sections,
+    decisions: { presentDecisionIds: [], missingDecisionIds: [] },
     quality: { hasTodo: false, todoLines: [], uncheckedChecklistCount: 0, uncheckedChecklistLines: [], blockingOpenQuestions: false },
     warnings: [summary],
     summary,
@@ -401,6 +511,26 @@ function analyzeOpenQuestions(section: PrdSection): PrdKernel["openQuestions"] {
   };
 }
 
+function isFinalConfirmationDecisionId(id: string): boolean {
+  return /(?:stage1[-_.])?final[-_.]?confirm|final[-_.]?confirmation|prd[-_.]?confirm/i.test(id);
+}
+
+function escapeTableCell(value: string): string {
+  return value.replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+}
+
+function analyzePrdDecisionCoverage(task: WorkflowTaskJson, markdown: string): PrdKernel["decisions"] {
+  const decisions = task.grill?.decisions ?? [];
+  const requiredIds = decisions
+    .filter((decision) => decision.status === "answered" && (decision.persistTo ?? "prd") === "prd")
+    .map((decision) => decision.id);
+  const presentDecisionIds = requiredIds.filter((id) => markdown.includes(id));
+  return {
+    presentDecisionIds,
+    missingDecisionIds: requiredIds.filter((id) => !presentDecisionIds.includes(id)),
+  };
+}
+
 function analyzeFinalConfirmation(
   sections: Record<PrdSectionKey, PrdSection>,
   executionFields: Record<string, string>,
@@ -420,10 +550,15 @@ function analyzeFinalConfirmation(
   for (const candidate of candidates) {
     const text = stripMarkdown(candidate.text);
     if (!text) continue;
-    if (isConfirmedText(text)) return { confirmed: true, evidence: `${candidate.label}: ${text.slice(0, 240)}`, found: true };
-    return { confirmed: false, evidence: `${candidate.label}: ${text.slice(0, 240)}`, found: true };
+    const confirmedPrdHash = extractConfirmedPrdHash(candidate.text);
+    if (isConfirmedText(text)) return { confirmed: true, evidence: `${candidate.label}: ${text.slice(0, 240)}`, found: true, confirmedPrdHash };
+    return { confirmed: false, evidence: `${candidate.label}: ${text.slice(0, 240)}`, found: true, confirmedPrdHash };
   }
   return { confirmed: false, found: false };
+}
+
+function extractConfirmedPrdHash(text: string): string | undefined {
+  return /Confirmed\s+PRD\s+Hash\s*[:：]\s*([a-f0-9]{12,64})/i.exec(text)?.[1];
 }
 
 function isConfirmedText(text: string): boolean {

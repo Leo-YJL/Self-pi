@@ -10,7 +10,7 @@ import { confirmPrdFinal } from "./engine/prdConfirm.ts";
 import { buildWorkflowCompactionSummary } from "./engine/compaction.ts";
 
 const PROFILE_VALUES = ["generic", "unity"] as const;
-const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive"] as const;
+const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "append_prd_decisions", "update_prd_section", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive"] as const;
 const ACTION_VALUES = [...SINGLE_ACTION_VALUES, "batch"] as const;
 const FLOW_VALUES = ["simple", "standard", "complex", "goal"] as const;
 const CONTEXT_VALUES = ["none", "lite", "brief", "task", "check", "finish"] as const;
@@ -20,6 +20,9 @@ const GRILL_DECISION_SEVERITY_VALUES = ["blocking", "non_blocking"] as const;
 const GRILL_DECISION_STATUS_VALUES = ["answered", "unanswered", "skipped"] as const;
 const GRILL_DECISION_SOURCE_VALUES = ["ask_user_question", "user", "command", "fast_path", "agent"] as const;
 const GRILL_PERSIST_VALUES = ["prd", "spec", "none"] as const;
+const GRILL_ROUND_KIND_VALUES = ["scope", "runtime", "validation", "final_confirmation", "custom"] as const;
+const PRD_SECTION_VALUES = ["executionContract", "goal", "requirements", "acceptanceCriteria", "validationPlan", "openQuestions", "finalConfirmation", "outOfScope", "definitionOfDone", "grillResult", "architectureImpact"] as const;
+const PRD_UPDATE_MODE_VALUES = ["replace", "append"] as const;
 
 const WorkflowRunBatchItemSchema = Type.Object({
   action: StringEnum(SINGLE_ACTION_VALUES),
@@ -41,6 +44,12 @@ const WorkflowRunBatchItemSchema = Type.Object({
   decisionSource: Type.Optional(StringEnum(GRILL_DECISION_SOURCE_VALUES)),
   decisionSummary: Type.Optional(Type.String()),
   persistTo: Type.Optional(StringEnum(GRILL_PERSIST_VALUES)),
+  roundId: Type.Optional(Type.String()),
+  roundKind: Type.Optional(StringEnum(GRILL_ROUND_KIND_VALUES)),
+  questionCount: Type.Optional(Type.Number()),
+  prdSection: Type.Optional(StringEnum(PRD_SECTION_VALUES)),
+  prdContent: Type.Optional(Type.String()),
+  prdUpdateMode: Type.Optional(StringEnum(PRD_UPDATE_MODE_VALUES)),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -102,6 +111,12 @@ export default function (pi: ExtensionAPI) {
       decisionSource: Type.Optional(StringEnum(GRILL_DECISION_SOURCE_VALUES)),
       decisionSummary: Type.Optional(Type.String()),
       persistTo: Type.Optional(StringEnum(GRILL_PERSIST_VALUES)),
+      roundId: Type.Optional(Type.String()),
+      roundKind: Type.Optional(StringEnum(GRILL_ROUND_KIND_VALUES)),
+      questionCount: Type.Optional(Type.Number()),
+      prdSection: Type.Optional(StringEnum(PRD_SECTION_VALUES)),
+      prdContent: Type.Optional(Type.String()),
+      prdUpdateMode: Type.Optional(StringEnum(PRD_UPDATE_MODE_VALUES)),
       actions: Type.Optional(Type.Array(WorkflowRunBatchItemSchema)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

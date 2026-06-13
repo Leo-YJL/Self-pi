@@ -5,7 +5,7 @@ import type { WorkflowTaskJson } from "./task.ts";
 import { evaluatePrdChecklistGate, prdGateToBlocker, readPrdKernel, type PrdKernel } from "./prd.ts";
 import { manifestFiles, manifestIssuesToBlockers, readTaskManifests, type WorkflowManifestSummary } from "./manifest.ts";
 import { readWorkspaceSummary, runGitDiffCheck, type GitDiffCheckResult, type WorkspaceSummary } from "./workspace.ts";
-import { grillStartBlockers } from "./grill.ts";
+import { grillPrdGateBlockers, grillStartBlockers } from "./grill.ts";
 
 export interface TaskValidationResult {
   passed: boolean;
@@ -65,6 +65,7 @@ async function validateStart(
     if (prd.quality.hasTodo) blockedBy.push({ code: "prd_todo_present", message: "PRD contains TODO/TBD markers; resolve them before start_checked.", severity: "blocking", path: prd.source.path });
     if (prd.openQuestions.blocking) blockedBy.push({ code: "prd_open_questions_blocking", message: `PRD has blocking open questions: ${prd.openQuestions.summary}`, severity: "blocking", path: prd.source.path });
     if (!prd.finalConfirmation.confirmed) blockedBy.push({ code: "prd_final_confirmation_missing", message: "PRD final confirmation is missing or not confirmed.", severity: "blocking", path: prd.source.path });
+    blockedBy.push(...grillPrdGateBlockers(task, prd));
   }
 
   const manifests = await readTaskManifests(root, task);
