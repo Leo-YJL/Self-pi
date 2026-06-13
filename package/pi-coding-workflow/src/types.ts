@@ -4,6 +4,7 @@ export type WorkflowStage = "grill" | "execute" | "finish";
 export type FlowLevel = "simple" | "standard" | "complex" | "goal";
 export type ContextMode = "none" | "lite" | "brief" | "task" | "check" | "finish";
 export type DetailMode = "lite" | "summary" | "normal" | "full";
+export type RunDetailMode = "lite" | "summary" | "full";
 export type RunMode = "dry_run" | "execute";
 export type ProfileName = "generic" | "unity";
 
@@ -55,6 +56,27 @@ export interface WorkflowSubagentBrief {
   expectedOutput: string;
 }
 
+export interface WorkflowDecisionCardHintOption {
+  label: string;
+  value: string;
+  recommended?: boolean;
+  description: string;
+  consequence?: string;
+}
+
+export interface WorkflowDecisionCardHint {
+  decisionId: string;
+  severity: "blocking" | "non_blocking";
+  persistTo: "prd" | "spec" | "none";
+  header: string;
+  question: string;
+  context: string;
+  ambiguity: string;
+  recommendation: string;
+  why: string;
+  options: WorkflowDecisionCardHintOption[];
+}
+
 export interface WorkflowAdaptiveControl {
   strategy: "deterministic_preflight" | "subagent_brief" | "ask_user" | "none";
   recommendedAgent: WorkflowAgent | "user" | "none";
@@ -63,6 +85,7 @@ export interface WorkflowAdaptiveControl {
   reasons: string[];
   deterministicActions: WorkflowRecommendedCall[];
   subagentBriefs: WorkflowSubagentBrief[];
+  decisionCardHints?: WorkflowDecisionCardHint[];
   stopConditions: string[];
 }
 
@@ -105,13 +128,39 @@ export interface WorkflowNextOutput {
   meta?: WorkflowResultMeta;
 }
 
-export type WorkflowRunAction = "create_from_grill" | "create_child" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "batch";
+export type WorkflowGrillDecisionSeverity = "blocking" | "non_blocking";
+export type WorkflowGrillDecisionStatus = "answered" | "unanswered" | "skipped";
+export type WorkflowGrillDecisionSource = "ask_user_question" | "user" | "command" | "fast_path" | "agent";
+export type WorkflowGrillStatus = "not_started" | "in_progress" | "finalized";
+
+export interface WorkflowGrillDecision {
+  id: string;
+  severity: WorkflowGrillDecisionSeverity;
+  status: WorkflowGrillDecisionStatus;
+  source: WorkflowGrillDecisionSource;
+  summary: string;
+  persistTo?: "prd" | "spec" | "none";
+  createdAt: string;
+}
+
+export interface WorkflowGrillState {
+  status: WorkflowGrillStatus;
+  rounds: number;
+  decisions: WorkflowGrillDecision[];
+  blockingOpenDecisions: number;
+  finalConfirmed: boolean;
+  finalConfirmedBy?: WorkflowGrillDecisionSource;
+  finalizedAt?: string;
+}
+
+export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "batch";
 export type WorkflowRunSingleAction = Exclude<WorkflowRunAction, "batch">;
 
 export interface WorkflowRunBatchItem {
   action: WorkflowRunSingleAction;
   task?: string;
   mode?: RunMode;
+  detail?: RunDetailMode;
   title?: string;
   level?: FlowLevel;
   slug?: string;
@@ -121,12 +170,19 @@ export interface WorkflowRunBatchItem {
   notes?: string;
   message?: string;
   userConfirmed?: boolean;
+  decisionId?: string;
+  decisionSeverity?: WorkflowGrillDecisionSeverity;
+  decisionStatus?: WorkflowGrillDecisionStatus;
+  decisionSource?: WorkflowGrillDecisionSource;
+  decisionSummary?: string;
+  persistTo?: "prd" | "spec" | "none";
 }
 
 export interface WorkflowRunInput {
   action: WorkflowRunAction;
   task?: string;
   mode?: RunMode;
+  detail?: RunDetailMode;
   title?: string;
   level?: FlowLevel;
   slug?: string;
@@ -136,6 +192,12 @@ export interface WorkflowRunInput {
   notes?: string;
   message?: string;
   userConfirmed?: boolean;
+  decisionId?: string;
+  decisionSeverity?: WorkflowGrillDecisionSeverity;
+  decisionStatus?: WorkflowGrillDecisionStatus;
+  decisionSource?: WorkflowGrillDecisionSource;
+  decisionSummary?: string;
+  persistTo?: "prd" | "spec" | "none";
   actions?: WorkflowRunBatchItem[];
 }
 
@@ -191,6 +253,7 @@ export interface WorkflowRunOutput {
   artifacts?: WorkflowArtifactRef[];
   checkpointId?: string;
   preflight?: unknown;
+  preflightRef?: string;
   git?: { committed?: boolean; commitHash?: string; pushed?: boolean; upstream?: string };
   nextRecommendedCall?: WorkflowRecommendedCall;
   meta?: WorkflowResultMeta;

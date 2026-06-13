@@ -10,16 +10,22 @@ import { confirmPrdFinal } from "./engine/prdConfirm.ts";
 import { buildWorkflowCompactionSummary } from "./engine/compaction.ts";
 
 const PROFILE_VALUES = ["generic", "unity"] as const;
-const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "start_checked", "checkpoint", "finish_run", "archive"] as const;
+const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive"] as const;
 const ACTION_VALUES = [...SINGLE_ACTION_VALUES, "batch"] as const;
 const FLOW_VALUES = ["simple", "standard", "complex", "goal"] as const;
 const CONTEXT_VALUES = ["none", "lite", "brief", "task", "check", "finish"] as const;
 const DETAIL_VALUES = ["lite", "summary", "normal", "full"] as const;
+const RUN_DETAIL_VALUES = ["lite", "summary", "full"] as const;
+const GRILL_DECISION_SEVERITY_VALUES = ["blocking", "non_blocking"] as const;
+const GRILL_DECISION_STATUS_VALUES = ["answered", "unanswered", "skipped"] as const;
+const GRILL_DECISION_SOURCE_VALUES = ["ask_user_question", "user", "command", "fast_path", "agent"] as const;
+const GRILL_PERSIST_VALUES = ["prd", "spec", "none"] as const;
 
 const WorkflowRunBatchItemSchema = Type.Object({
   action: StringEnum(SINGLE_ACTION_VALUES),
   task: Type.Optional(Type.String()),
   mode: Type.Optional(StringEnum(["dry_run", "execute"] as const)),
+  detail: Type.Optional(StringEnum(RUN_DETAIL_VALUES)),
   title: Type.Optional(Type.String()),
   level: Type.Optional(StringEnum(FLOW_VALUES)),
   slug: Type.Optional(Type.String()),
@@ -29,6 +35,12 @@ const WorkflowRunBatchItemSchema = Type.Object({
   notes: Type.Optional(Type.String()),
   message: Type.Optional(Type.String()),
   userConfirmed: Type.Optional(Type.Boolean()),
+  decisionId: Type.Optional(Type.String()),
+  decisionSeverity: Type.Optional(StringEnum(GRILL_DECISION_SEVERITY_VALUES)),
+  decisionStatus: Type.Optional(StringEnum(GRILL_DECISION_STATUS_VALUES)),
+  decisionSource: Type.Optional(StringEnum(GRILL_DECISION_SOURCE_VALUES)),
+  decisionSummary: Type.Optional(Type.String()),
+  persistTo: Type.Optional(StringEnum(GRILL_PERSIST_VALUES)),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -74,6 +86,7 @@ export default function (pi: ExtensionAPI) {
       action: StringEnum(ACTION_VALUES),
       task: Type.Optional(Type.String()),
       mode: Type.Optional(StringEnum(["dry_run", "execute"] as const)),
+      detail: Type.Optional(StringEnum(RUN_DETAIL_VALUES)),
       title: Type.Optional(Type.String()),
       level: Type.Optional(StringEnum(FLOW_VALUES)),
       slug: Type.Optional(Type.String()),
@@ -83,6 +96,12 @@ export default function (pi: ExtensionAPI) {
       notes: Type.Optional(Type.String()),
       message: Type.Optional(Type.String()),
       userConfirmed: Type.Optional(Type.Boolean()),
+      decisionId: Type.Optional(Type.String()),
+      decisionSeverity: Type.Optional(StringEnum(GRILL_DECISION_SEVERITY_VALUES)),
+      decisionStatus: Type.Optional(StringEnum(GRILL_DECISION_STATUS_VALUES)),
+      decisionSource: Type.Optional(StringEnum(GRILL_DECISION_SOURCE_VALUES)),
+      decisionSummary: Type.Optional(Type.String()),
+      persistTo: Type.Optional(StringEnum(GRILL_PERSIST_VALUES)),
       actions: Type.Optional(Type.Array(WorkflowRunBatchItemSchema)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

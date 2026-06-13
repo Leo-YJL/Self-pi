@@ -84,6 +84,37 @@ async function seedTaskPreflight(root: string, taskId: string, options: Paramete
   await writeFile(join(taskDir, "prd.md"), prdMarkdown("Ready Task", options), "utf8");
   await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
   await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+
+  const finalConfirmed = options.finalConfirmed ?? true;
+  const canFinalizeGrill = !options.todo && finalConfirmed && isNeutralOpenQuestions(options.openQuestions ?? "None.");
+  if (canFinalizeGrill) {
+    const decision = await workflowRun(root, {
+      action: "record_grill_decision",
+      mode: "execute",
+      task: taskId,
+      decisionId: "test.scope-confirmed",
+      decisionSeverity: "blocking",
+      decisionSource: "user",
+      decisionSummary: "Test fixture confirms scope, validation plan and implementation readiness.",
+      persistTo: "prd",
+    });
+    if (!decision.ok) throw new Error(`seedTaskPreflight record_grill_decision failed: ${decision.summary}`);
+
+    const finalized = await workflowRun(root, {
+      action: "finalize_grill",
+      mode: "execute",
+      task: taskId,
+      userConfirmed: true,
+      decisionSource: "user",
+      notes: "Test fixture finalizes Stage 1 grill after PRD final confirmation.",
+    });
+    if (!finalized.ok) throw new Error(`seedTaskPreflight finalize_grill failed: ${finalized.summary}`);
+  }
+}
+
+function isNeutralOpenQuestions(text: string): boolean {
+  const normalized = text.replace(/[.。；;!！\s]+$/g, "").toLowerCase();
+  return !normalized || /^(none|no blockers?|no blocking questions?|n\/a|not applicable|na|无|无阻塞|暂无|没有|不适用|无需)$/.test(normalized) || /无阻塞|暂无阻塞|no blocking/.test(normalized);
 }
 
 function blockerCodes(result: { blockedBy: Array<{ code: string }> }): string[] {
@@ -173,17 +204,27 @@ test("workflow_next detects active planning and in-progress tasks", async () => 
   assert.equal(next.status, "planning");
   assert.equal(next.stage, "grill");
   assert.equal(next.flowLevel, "complex");
-  assert.equal(next.nextAction, "start_checked");
+  assert.equal(next.nextAction, "ask_user");
+  assert.ok(blockerCodes(next).includes("grill_not_finalized"));
   assert.ok(blockerCodes(next).includes("prd_todo_present"));
+  assert.equal(next.adaptiveControl?.strategy, "ask_user");
+  assert.equal(next.adaptiveControl?.decisionCardHints?.[0]?.header, "Grill");
 
   const blockedStartDryRun = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(blockedStartDryRun.ok, false);
+  assert.ok(blockerCodes(blockedStartDryRun).includes("grill_not_finalized"));
   assert.ok(blockerCodes(blockedStartDryRun).includes("prd_todo_present"));
 
   await seedTaskPreflight(root, create.task!, { finishComplete: false });
   const startDryRun = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(startDryRun.ok, true);
   assert.equal(startDryRun.mutated, false);
+  assert.equal(startDryRun.preflight, undefined);
+  assert.match(startDryRun.preflightRef ?? "", /^\.workflow\/\.runtime\/preflight\//);
+  assert.match(await readFile(join(root, startDryRun.preflightRef!), "utf8"), /pi-coding-workflow\.preflight/);
+  const fullStartDryRun = await workflowRun(root, { action: "start_checked", mode: "dry_run", detail: "full", task: create.task });
+  assert.ok(fullStartDryRun.preflight);
+  assert.equal(fullStartDryRun.preflightRef, undefined);
 
   const start = await workflowRun(root, { action: "start_checked", mode: "execute", task: create.task });
   assert.equal(start.ok, true);
@@ -293,6 +334,42 @@ test("workflow-prd-confirm engine records final confirmation without LLM", async
   const kernel = await readPrdKernel(root, { id: create.task!, title: "Confirm PRD", status: "planning", stage: "grill", flowLevel: "complex", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, "compact");
   assert.equal(kernel.finalConfirmation.confirmed, true);
 
+  const decision = await workflowRun(root, {
+    action: "record_grill_decision",
+    mode: "execute",
+    task: create.task,
+    decisionId: "confirm-prd.scope",
+    decisionSeverity: "blocking",
+    decisionSource: "ask_user_question",
+    decisionSummary: "User approved implementation after reviewing the PRD.",
+  });
+  assert.equal(decision.ok, true);
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "ask_user_question", notes: "User approved implementation." });
+  assert.equal(finalize.ok, true);
+
+  const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(start.ok, true);
+});
+
+test("start preflight requires finalized Stage 1 grill", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-grill-gate-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Grill Gate", level: "standard", slug: "grill-gate" });
+  await seedManifestFiles(root);
+  const taskDir = join(root, ".workflow/tasks", create.task!);
+  await writeFile(join(taskDir, "prd.md"), prdMarkdown("Grill Gate", { finishComplete: true }), "utf8");
+  await writeFile(join(taskDir, "implement.jsonl"), `${JSON.stringify({ file: "src/main.ts", reason: "Implementation target" })}\n`, "utf8");
+  await writeFile(join(taskDir, "check.jsonl"), `${JSON.stringify({ file: "tests/main.test.ts", reason: "Validation target" })}\n`, "utf8");
+
+  const blocked = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
+  assert.equal(blocked.ok, false);
+  assert.ok(blockerCodes(blocked).includes("grill_not_finalized"));
+
+  const decision = await workflowRun(root, { action: "record_grill_decision", mode: "execute", task: create.task, decisionId: "grill-gate.scope", decisionSource: "user", decisionSeverity: "blocking", decisionSummary: "User confirmed scope and validation." });
+  assert.equal(decision.ok, true);
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "user", notes: "User confirmed the PRD can start." });
+  assert.equal(finalize.ok, true);
+
   const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(start.ok, true);
 });
@@ -356,6 +433,29 @@ test("workflow compaction summary preserves active workflow state", () => {
   assert.match(built!.summary, /activeTask: 06-12-demo/);
   assert.match(built!.summary, /workflow_next/);
   assert.ok(built!.details.modifiedFiles.includes("src/engine/run.ts"));
+});
+
+test("workflow compaction avoids recursive previous summary growth", () => {
+  const previous = `## Workflow State\n- activeTask: 06-12-old\n- status/stage: in_progress/execute\n- nextAction: implement_slice\n\n## Progress\nPrevious compaction summary excerpt:\n## Workflow State\n- activeTask: older\nPrevious compaction summary excerpt:\nolder older`;
+  const built = buildWorkflowCompactionSummary({
+    branchEntries: [
+      { type: "custom", customType: "pi-coding-workflow", data: { kind: "workflow_next", task: "06-13-new", status: "planning", stage: "grill", nextAction: "ask_user" } },
+    ],
+    preparation: {
+      previousSummary: previous,
+      messagesToSummarize: [
+        { role: "user", content: [{ type: "text", text: "Continue with a concise grill." }] },
+      ],
+      fileOps: { readFiles: Array.from({ length: 30 }, (_, i) => `src/file-${i}.ts`), modifiedFiles: Array.from({ length: 30 }, (_, i) => `src/mod-${i}.ts`) },
+    },
+  });
+
+  assert.ok(built);
+  assert.match(built!.summary, /Previous workflow checkpoint: activeTask=06-12-old/);
+  assert.equal((built!.summary.match(/Previous compaction summary excerpt/g) ?? []).length, 0);
+  assert.ok(built!.summary.length <= 3200 + 32);
+  assert.equal(built!.details.readFiles.length, 20);
+  assert.equal(built!.details.modifiedFiles.length, 20);
 });
 
 test("workflow telemetry writes schema-versioned JSONL events", async () => {

@@ -1,4 +1,4 @@
-import type { WorkflowAdaptiveControl, WorkflowAgent, WorkflowBlocker, WorkflowNextOutput, WorkflowRecommendedCall, WorkflowSubagentBrief, WorkflowWarning } from "../types.ts";
+import type { WorkflowAdaptiveControl, WorkflowAgent, WorkflowBlocker, WorkflowDecisionCardHint, WorkflowNextOutput, WorkflowRecommendedCall, WorkflowSubagentBrief, WorkflowWarning } from "../types.ts";
 import type { WorkflowContextBundle } from "./contextBundle.ts";
 
 interface AdaptiveInput {
@@ -16,6 +16,11 @@ const RESEARCH_CODES = new Set([
 const USER_GATE_CODES = new Set([
   "prd_final_confirmation_missing",
   "user_confirmation_required",
+  "grill_not_finalized",
+  "grill_decision_log_missing",
+  "grill_final_confirmation_missing",
+  "grill_final_confirmation_not_user_sourced",
+  "grill_blocking_decisions_unanswered",
 ]);
 
 const IMPLEMENT_CODES = new Set([
@@ -60,6 +65,7 @@ export function buildAdaptiveControl(input: AdaptiveInput): WorkflowAdaptiveCont
   const shouldSpawnSubagent = recommendedAgent !== "none" && recommendedAgent !== "user" && !shouldAskUser;
   const risk = riskFor(input.bundle, blockers, warnings);
   const reasons = reasonLines(input, recommendedAgent, codes, blockers, warnings);
+  const decisionCardHints = shouldAskUser ? decisionCardHintsFor(input, blockers, codes) : [];
 
   return {
     strategy: shouldAskUser
@@ -75,6 +81,7 @@ export function buildAdaptiveControl(input: AdaptiveInput): WorkflowAdaptiveCont
     reasons,
     deterministicActions,
     subagentBriefs: shouldSpawnSubagent ? [briefFor(recommendedAgent, input, codes, evidenceRefs)] : [],
+    decisionCardHints,
     stopConditions: stopConditionsFor(input.bundle, blockers),
   };
 }
@@ -90,8 +97,74 @@ export function compactAdaptiveControl(control: WorkflowAdaptiveControl): Workfl
       instructions: brief.instructions.slice(0, 6),
       stopConditions: brief.stopConditions.slice(0, 5),
     })).slice(0, 1),
+    decisionCardHints: control.decisionCardHints?.slice(0, 3),
     stopConditions: control.stopConditions.slice(0, 6),
   };
+}
+
+function decisionCardHintsFor(input: AdaptiveInput, blockers: WorkflowBlocker[], codes: string[]): WorkflowDecisionCardHint[] {
+  const task = input.bundle.task;
+  const blockerCodes = blockers.map((blocker) => blocker.code);
+  const needsGrill = blockerCodes.some((code) => code.startsWith("grill_"));
+  const needsPrdConfirmation = blockerCodes.includes("prd_final_confirmation_missing") || blockerCodes.includes("user_confirmation_required");
+  const needsOpenQuestion = blockerCodes.includes("prd_open_questions_blocking") || codes.includes("open_questions_maybe_present");
+
+  if (needsGrill) {
+    return [{
+      decisionId: `${task.id}.stage1-grill-finalize`,
+      severity: "blocking",
+      persistTo: "prd",
+      header: "Grill",
+      question: `Can task ${task.id} enter implementation with the current PRD scope?`,
+      context: `Task is ${task.status}/${task.stage}/${task.flowLevel}; start_checked is blocked until Stage 1 grill has a user-sourced decision record and finalize_grill succeeds.`,
+      ambiguity: "Without this decision, the agent may infer scope, risk and validation choices from context instead of using an explicit user decision.",
+      recommendation: "Confirm the current PRD only if scope, out-of-scope, risks and validation limits are clear; otherwise ask one focused adjustment question first.",
+      why: "A short Decision Card produces a durable PRD decision and avoids long agent-side speculation before implementation.",
+      options: [
+        { label: "Confirm PRD", value: "confirm_prd", recommended: true, description: "Use the current PRD as the implementation contract.", consequence: "Record a blocking grill decision, then run finalize_grill before start_checked." },
+        { label: "Adjust scope", value: "adjust_scope", description: "Change in-scope or out-of-scope boundaries before implementation.", consequence: "Update PRD decisions and ask again if a blocking ambiguity remains." },
+        { label: "Add validation", value: "add_validation", description: "Clarify required checks, environment limits or manual validation.", consequence: "Update the Validation Plan before finalize_grill." },
+      ],
+    }];
+  }
+
+  if (needsOpenQuestion) {
+    return [{
+      decisionId: `${task.id}.open-question`,
+      severity: "blocking",
+      persistTo: "prd",
+      header: "Question",
+      question: `Which PRD open question must be resolved before task ${task.id} starts?`,
+      context: `The PRD still has blocking open questions: ${input.bundle.prd.openQuestions.summary}`,
+      ambiguity: "Starting now would force the agent to choose an implementation contract without user confirmation.",
+      recommendation: "Resolve the blocking question with one concrete option and write it into the PRD Decisions section.",
+      why: "Resolving one blocking branch at a time keeps grill short and prevents broad speculative analysis.",
+      options: [
+        { label: "Use recommendation", value: "use_recommendation", recommended: true, description: "Accept the safest implementation recommendation after the agent states it concisely.", consequence: "The answer becomes a PRD decision." },
+        { label: "Choose alternative", value: "choose_alternative", description: "Pick another explicit behavior or boundary.", consequence: "The PRD and manifests may need adjustment." },
+      ],
+    }];
+  }
+
+  if (needsPrdConfirmation) {
+    return [{
+      decisionId: `${task.id}.final-confirmation`,
+      severity: "blocking",
+      persistTo: "prd",
+      header: "Confirm",
+      question: `Do you confirm task ${task.id} can proceed to implementation?`,
+      context: "The PRD final confirmation gate is missing or not recognized.",
+      ambiguity: "Without final confirmation, start_checked must remain blocked even if the PRD appears complete.",
+      recommendation: "Confirm only after reviewing scope, risks and validation limits.",
+      why: "This gives the workflow a user-sourced gate instead of relying on an LLM-authored confirmation line.",
+      options: [
+        { label: "Confirm", value: "confirm", recommended: true, description: "Proceed with the current PRD.", consequence: "Record final confirmation and then finalize_grill." },
+        { label: "Revise PRD", value: "revise", description: "Pause to change scope, acceptance criteria or validation plan.", consequence: "Keep task in planning/grill." },
+      ],
+    }];
+  }
+
+  return [];
 }
 
 function chooseAgent(input: AdaptiveInput, codes: string[], blockers: WorkflowBlocker[]): WorkflowAdaptiveControl["recommendedAgent"] {

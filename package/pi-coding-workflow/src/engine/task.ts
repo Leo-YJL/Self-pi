@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { FlowLevel, WorkflowStatus } from "../types.ts";
+import type { FlowLevel, WorkflowGrillState, WorkflowStatus } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 
 export interface WorkflowTaskJson {
@@ -10,6 +10,7 @@ export interface WorkflowTaskJson {
   status: WorkflowStatus;
   flowLevel: FlowLevel;
   stage: "grill" | "execute" | "finish";
+  grill?: WorkflowGrillState;
   createdAt: string;
   updatedAt: string;
   parentTask?: string;
@@ -65,7 +66,17 @@ export async function createTask(root: string, title: string, level: FlowLevel, 
   if (existsSync(dir)) throw new Error(`Task already exists: ${id}`);
   await mkdir(join(dir, "research"), { recursive: true });
   const now = new Date().toISOString();
-  const task: WorkflowTaskJson = { id, title, status: "planning", flowLevel: level, stage: "grill", createdAt: now, updatedAt: now, parentTask };
+  const task: WorkflowTaskJson = {
+    id,
+    title,
+    status: "planning",
+    flowLevel: level,
+    stage: "grill",
+    grill: { status: "in_progress", rounds: 0, decisions: [], blockingOpenDecisions: 0, finalConfirmed: false },
+    createdAt: now,
+    updatedAt: now,
+    parentTask,
+  };
   await writeTask(root, task);
   await writeFile(join(dir, "prd.md"), `# ${title}\n\n## Execution Contract\n\n- Flow Level: ${level}\n- Outcome: TODO\n\n## Open Questions\n\nNone.\n`, "utf8");
   return task;

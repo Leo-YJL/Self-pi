@@ -5,6 +5,7 @@ import type { WorkflowTaskJson } from "./task.ts";
 import { evaluatePrdChecklistGate, prdGateToBlocker, readPrdKernel, type PrdKernel } from "./prd.ts";
 import { manifestFiles, manifestIssuesToBlockers, readTaskManifests, type WorkflowManifestSummary } from "./manifest.ts";
 import { readWorkspaceSummary, runGitDiffCheck, type GitDiffCheckResult, type WorkspaceSummary } from "./workspace.ts";
+import { grillStartBlockers } from "./grill.ts";
 
 export interface TaskValidationResult {
   passed: boolean;
@@ -58,6 +59,7 @@ async function validateStart(
   const taskDir = `.workflow/tasks/${task.id}`;
   if (task.status !== "planning") blockedBy.push({ code: "task_not_planning", message: `start_checked requires planning status, got ${task.status}.`, severity: "blocking", path: `${taskDir}/task.json` });
   if (task.stage !== "grill") blockedBy.push({ code: "stage_not_grill", message: `start_checked requires stage=grill, got ${task.stage}.`, severity: "blocking", path: `${taskDir}/task.json` });
+  blockedBy.push(...grillStartBlockers(task));
 
   if (prd.source.exists) {
     if (prd.quality.hasTodo) blockedBy.push({ code: "prd_todo_present", message: "PRD contains TODO/TBD markers; resolve them before start_checked.", severity: "blocking", path: prd.source.path });

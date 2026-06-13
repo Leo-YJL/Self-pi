@@ -33,14 +33,14 @@ export function buildWorkflowCompactionSummary(input: WorkflowCompactionInput): 
   if (!latest) return null;
 
   const data = latest.data;
-  const readFiles = uniqueStrings(input.preparation?.fileOps?.readFiles ?? []);
-  const modifiedFiles = uniqueStrings(input.preparation?.fileOps?.modifiedFiles ?? []);
+  const readFiles = uniqueStrings(input.preparation?.fileOps?.readFiles ?? []).slice(0, 20);
+  const modifiedFiles = uniqueStrings(input.preparation?.fileOps?.modifiedFiles ?? []).slice(0, 20);
   const recentConversation = extractRecentConversation([
     ...(input.preparation?.messagesToSummarize ?? []),
     ...(input.preparation?.turnPrefixMessages ?? []),
   ]);
-  const previousSummary = trimBlock(input.preparation?.previousSummary, 1_800);
-  const artifactRefs = uniqueStrings([...(data.artifactRefs ?? []), ...(data.omittedRefs ?? [])]).slice(0, 12);
+  const previousSignal = previousWorkflowSignal(input.preparation?.previousSummary);
+  const artifactRefs = uniqueStrings([...(data.artifactRefs ?? []), ...(data.omittedRefs ?? [])]).slice(0, 8);
 
   const lines = [
     "## Workflow State",
@@ -54,7 +54,7 @@ export function buildWorkflowCompactionSummary(input: WorkflowCompactionInput): 
     artifactRefs.length > 0 ? `- artifactRefs: ${artifactRefs.join(", ")}` : undefined,
     "",
     "## Progress",
-    previousSummary ? `Previous compaction summary excerpt:\n${previousSummary}` : "No previous compaction summary was available.",
+    previousSignal || "No previous compaction summary was available.",
     recentConversation.length > 0 ? "" : undefined,
     recentConversation.length > 0 ? "Recent non-tool conversation signals:" : undefined,
     ...recentConversation.map((item) => `- ${item}`),
@@ -74,7 +74,7 @@ export function buildWorkflowCompactionSummary(input: WorkflowCompactionInput): 
     "3. Use workflow_run batch for deterministic follow-up actions when possible.",
   ].filter((line): line is string => typeof line === "string");
 
-  const summary = lines.join("\n");
+  const summary = trimMultiline(lines.join("\n"), 3_200);
   return {
     summary,
     details: {
@@ -103,16 +103,27 @@ function collectWorkflowEntries(entries: unknown[]): Array<{ data: any }> {
   return result;
 }
 
+function previousWorkflowSignal(text: unknown): string {
+  if (typeof text !== "string" || !text.trim()) return "";
+  const head = text.split(/Previous compaction summary excerpt:/i)[0];
+  const task = /- activeTask:\s*([^\n]+)/.exec(head)?.[1]?.trim();
+  const statusStage = /- status\/stage:\s*([^\n]+)/.exec(head)?.[1]?.trim();
+  const nextAction = /- nextAction:\s*([^\n]+)/.exec(head)?.[1]?.trim();
+  const parts = [task ? `activeTask=${task}` : undefined, statusStage ? `status/stage=${statusStage}` : undefined, nextAction ? `nextAction=${nextAction}` : undefined].filter(Boolean);
+  if (parts.length === 0) return "Previous workflow summary existed but was intentionally compacted to avoid recursive summary growth.";
+  return `Previous workflow checkpoint: ${parts.join("; ")}.`;
+}
+
 function extractRecentConversation(messages: unknown[]): string[] {
   const result: string[] = [];
   for (const message of messages as any[]) {
     const role = message?.role ?? message?.message?.role;
     if (role !== "user" && role !== "assistant") continue;
-    const text = trimBlock(extractText(message?.content ?? message?.message?.content), 260);
+    const text = trimBlock(extractText(message?.content ?? message?.message?.content), 180);
     if (!text) continue;
     result.push(`${role}: ${text}`);
   }
-  return result.slice(-8);
+  return result.slice(-5);
 }
 
 function extractText(content: unknown): string {
@@ -131,6 +142,11 @@ function trimBlock(text: unknown, maxChars: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxChars) return normalized;
   return `${normalized.slice(0, Math.max(0, maxChars - 16)).trimEnd()} ...[truncated]`;
+}
+
+function trimMultiline(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 32)).trimEnd()}\n...[compaction summary truncated]`;
 }
 
 function uniqueStrings(values: unknown[]): string[] {

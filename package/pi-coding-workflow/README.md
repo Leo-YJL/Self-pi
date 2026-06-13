@@ -80,6 +80,8 @@ npm install @leo-yjl/pi-coding-workflow
 ```text
 create_from_grill
 create_child
+record_grill_decision
+finalize_grill
 start_checked
 checkpoint
 finish_run
@@ -90,7 +92,9 @@ batch
 规则：
 
 - 默认 `mode: "dry_run"`。
+- 默认 `detail: "lite"`；`start_checked` / `finish_run` / `checkpoint` 的完整 preflight details 会写入 `.workflow/.runtime/preflight/*.json`，工具结果只返回 `preflightRef`。需要内联详情时显式传 `detail: "summary"` 或 `detail: "full"`。
 - 修改 task 状态需要 `mode: "execute"`。
+- `record_grill_decision` / `finalize_grill` 记录并收口 Stage 1 grill；所有未 finalized 的 planning task 会被 `start_checked` 阻止，standard/complex/goal 还要求用户来源的决策记录。
 - `start_checked` 和 `finish_run` 会执行确定性 preflight。
 - `batch` 可顺序执行多个动作，并返回 transaction、artifact 和 rollback hints。
 
@@ -310,6 +314,8 @@ Supported actions:
 ```text
 create_from_grill
 create_child
+record_grill_decision
+finalize_grill
 start_checked
 checkpoint
 finish_run
@@ -320,7 +326,9 @@ batch
 Rules:
 
 - Defaults to `mode: "dry_run"`.
+- Defaults to `detail: "lite"`; full preflight details for `start_checked` / `finish_run` / `checkpoint` are written to `.workflow/.runtime/preflight/*.json` and returned as `preflightRef`. Pass `detail: "summary"` or `detail: "full"` when inline details are needed.
 - Task mutations require `mode: "execute"`.
+- `record_grill_decision` / `finalize_grill` record and close Stage 1 grill; `start_checked` blocks any planning task that is not finalized, and standard/complex/goal tasks also require a user-sourced decision log.
 - `start_checked` and `finish_run` run deterministic preflight checks first.
 - `batch` runs multiple actions in order and returns transaction artifacts plus rollback hints.
 

@@ -6,10 +6,12 @@ import { validateTask } from "./validate.ts";
 import { estimateTokens, RUN_RESULT_TARGET_TOKENS } from "./contextBudget.ts";
 import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
 import { writeWorkflowTelemetry } from "./telemetry.ts";
+import { appendGrillDecision, finalizeGrillState, validateGrillFinalization } from "./grill.ts";
 
 export async function workflowRun(root: string, input: WorkflowRunInput): Promise<WorkflowRunOutput> {
   const startedAt = Date.now();
-  const result = decorateRunOutput(await workflowRunInternal(root, input, 0), startedAt);
+  const raw = await workflowRunInternal(root, input, 0);
+  const result = decorateRunOutput(await applyRunDetail(root, raw, input), startedAt);
   await writeWorkflowTelemetry(root, "workflow_run", result);
   return result;
 }
@@ -36,10 +38,12 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
         action: item.action,
         mode: mode === "dry_run" ? "dry_run" : item.mode ?? "execute",
         task: item.task ?? input.task,
+        detail: item.detail ?? input.detail ?? "lite",
       } as WorkflowRunInput;
       const beforeTask = childInput.mode === "execute" ? await taskSnapshotForRollback(root, childInput) : null;
       const childStartedAt = Date.now();
-      const child = decorateRunOutput(await workflowRunInternal(root, childInput, depth + 1), childStartedAt);
+      const childRaw = await workflowRunInternal(root, childInput, depth + 1);
+      const child = decorateRunOutput(await applyRunDetail(root, childRaw, childInput), childStartedAt);
       results.push(child);
       mutated = mutated || child.mutated;
       rollbackHints.push(...rollbackHintsFor(index, childInput, child, beforeTask));
@@ -87,7 +91,7 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     const plannedTask = `${todayPrefix()}-${input.slug ?? slugify(input.title)}`;
     if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run create_from_grill; would create task ${plannedTask}.`), task: plannedTask, status: "planning", stage: "grill", nextAction: "execute_create_from_grill" };
     const task = await createTask(root, input.title, input.level, input.slug);
-    return { ...ok(action, mode, true, `Created task ${task.id}`), task: task.id, status: task.status, stage: task.stage, nextAction: "write_prd_and_manifests" };
+    return { ...ok(action, mode, true, `Created task ${task.id}`), task: task.id, status: task.status, stage: task.stage, nextAction: "write_prd_manifests_and_grill_decisions" };
   }
 
   if (action === "create_child") {
@@ -95,7 +99,31 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     const plannedTask = `${todayPrefix()}-${input.slug ?? slugify(input.title)}`;
     if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run create_child; would create child task ${plannedTask}.`), task: plannedTask, status: "planning", stage: "grill", nextAction: "execute_create_child" };
     const task = await createTask(root, input.title, input.level, input.slug, input.parentTask);
-    return { ...ok(action, mode, true, `Created child task ${task.id}`), task: task.id, status: task.status, stage: task.stage, nextAction: "write_child_prd_and_manifests" };
+    return { ...ok(action, mode, true, `Created child task ${task.id}`), task: task.id, status: task.status, stage: task.stage, nextAction: "write_child_prd_manifests_and_grill_decisions" };
+  }
+
+  if (action === "record_grill_decision") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "record_grill_decision requires task or an active planning task.");
+    if (task.status !== "planning" || task.stage !== "grill") return blocked(action, mode, "task_not_planning", `record_grill_decision requires planning/grill, got ${task.status}/${task.stage}.`);
+    if (!input.decisionId) return blocked(action, mode, "missing_decision_id", "record_grill_decision requires decisionId.");
+    const summary = (input.decisionSummary ?? input.message ?? input.notes ?? "").trim();
+    if (!summary) return blocked(action, mode, "missing_decision_summary", "record_grill_decision requires decisionSummary, message or notes.");
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run record_grill_decision; would record ${input.decisionId} for ${task.id}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_record_grill_decision" };
+    const decision = appendGrillDecision(task, input);
+    await writeTask(root, task);
+    return { ...ok(action, mode, true, `Recorded grill decision ${decision.id} for ${task.id}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "continue_grill_or_finalize" };
+  }
+
+  if (action === "finalize_grill") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "finalize_grill requires task or an active planning task.");
+    const blockers = await validateGrillFinalization(root, task, input);
+    if (blockers.length > 0) return { ...blocked(action, mode, "grill_finalization_failed", "finalize_grill validation failed."), blockedBy: blockers, task: task.id, status: task.status, stage: task.stage, nextAction: "fix_grill_blockers" };
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run finalize_grill; task ${task.id} can enter start_checked preflight.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_finalize_grill" };
+    finalizeGrillState(task, input);
+    await writeTask(root, task);
+    return { ...ok(action, mode, true, `Finalized Stage 1 grill for ${task.id}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "start_checked" };
   }
 
   if (action === "start_checked") {
@@ -234,14 +262,14 @@ function plannedAction(item: WorkflowRunBatchItem, input: WorkflowRunInput, mode
     mode: mode === "dry_run" ? "dry_run" : item.mode ?? "execute",
     task: item.task ?? input.task,
     title: item.title,
-    summary: item.action === "create_from_grill" || item.action === "create_child" ? `Plan ${item.action}: ${item.title ?? "untitled"}` : `Plan ${item.action}`,
+    summary: item.action === "create_from_grill" || item.action === "create_child" ? `Plan ${item.action}: ${item.title ?? "untitled"}` : item.action === "record_grill_decision" ? `Plan record_grill_decision: ${item.decisionId ?? "unnamed"}` : `Plan ${item.action}`,
   };
 }
 
 async function taskSnapshotForRollback(root: string, input: WorkflowRunInput): Promise<WorkflowTaskJson | null> {
   try {
     if (input.task) return await readTask(root, input.task);
-    if (input.action === "start_checked" || input.action === "finish_run") return await findActiveTask(root);
+    if (input.action === "record_grill_decision" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") return await findActiveTask(root);
   } catch {
     return null;
   }
@@ -259,14 +287,14 @@ function rollbackHintsFor(index: number, input: WorkflowRunInput, output: Workfl
       summary: `Remove .workflow/tasks/${output.task} if this created task should be rolled back.`,
     }];
   }
-  if ((input.action === "start_checked" || input.action === "finish_run") && beforeTask) {
+  if ((input.action === "record_grill_decision" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") && beforeTask) {
     return [{
       actionIndex: index,
       action: input.action,
       kind: "restore_task_json",
       path: `.workflow/tasks/${beforeTask.id}/task.json`,
       summary: `Restore task ${beforeTask.id} to ${beforeTask.status}/${beforeTask.stage}.`,
-      data: { status: beforeTask.status, stage: beforeTask.stage, updatedAt: beforeTask.updatedAt },
+      data: { status: beforeTask.status, stage: beforeTask.stage, grill: beforeTask.grill, updatedAt: beforeTask.updatedAt },
     }];
   }
   return [];
@@ -275,6 +303,87 @@ function rollbackHintsFor(index: number, input: WorkflowRunInput, output: Workfl
 async function resolveTask(root: string, id?: string): Promise<WorkflowTaskJson | null> {
   if (id) return readTask(root, id);
   return findActiveTask(root);
+}
+
+async function applyRunDetail(root: string, output: WorkflowRunOutput, input: WorkflowRunInput): Promise<WorkflowRunOutput> {
+  const detail = input.detail ?? "lite";
+  if (detail === "full" || output.preflight === undefined) return output;
+
+  const artifact = await writeJsonArtifact(root, "preflight", {
+    kind: "pi-coding-workflow.preflight",
+    schemaVersion: 1,
+    action: output.action,
+    mode: output.mode,
+    task: output.task,
+    status: output.status,
+    stage: output.stage,
+    ok: output.ok,
+    summary: output.summary,
+    blockedBy: output.blockedBy,
+    warnings: output.warnings,
+    preflight: output.preflight,
+    createdAt: new Date().toISOString(),
+  });
+  const existingArtifacts = output.artifacts ?? (output.artifactRef ? [{ kind: output.action === "checkpoint" ? "checkpoint" : "artifact", ref: output.artifactRef, summary: output.summary }] : []);
+  const preflightArtifact = { kind: "preflight", ref: artifact.artifactRef, summary: `${output.action} preflight details` };
+
+  return {
+    ...output,
+    preflight: detail === "summary" ? summarizePreflight(output.preflight) : undefined,
+    preflightRef: artifact.artifactRef,
+    artifacts: [...existingArtifacts, preflightArtifact],
+  };
+}
+
+function summarizePreflight(preflight: unknown): unknown {
+  if (!preflight || typeof preflight !== "object") return preflight;
+  const value = preflight as any;
+  return {
+    phase: value.phase,
+    prd: value.prd ? {
+      title: value.prd.title,
+      source: value.prd.source,
+      openQuestions: value.prd.openQuestions,
+      finalConfirmation: value.prd.finalConfirmation,
+      quality: value.prd.quality ? {
+        hasTodo: value.prd.quality.hasTodo,
+        uncheckedChecklistCount: value.prd.quality.uncheckedChecklistCount,
+        blockingOpenQuestions: value.prd.quality.blockingOpenQuestions,
+      } : undefined,
+      summary: value.prd.summary,
+    } : undefined,
+    manifests: value.manifests ? {
+      implement: summarizeManifest(value.manifests.implement),
+      check: summarizeManifest(value.manifests.check),
+    } : undefined,
+    workspace: value.workspace ? {
+      isGit: value.workspace.isGit,
+      dirtyCount: value.workspace.dirtyCount,
+      inScopeCount: value.workspace.inScopeCount,
+      taskFileCount: value.workspace.taskFileCount,
+      unrelatedCount: value.workspace.unrelatedCount,
+      summary: value.workspace.summary,
+    } : undefined,
+    gitDiffCheck: value.gitDiffCheck ? {
+      passed: value.gitDiffCheck.passed,
+      summary: value.gitDiffCheck.summary,
+      error: value.gitDiffCheck.error,
+    } : undefined,
+    checklistGates: Array.isArray(value.checklistGates) ? value.checklistGates.map((gate: any) => ({ key: gate.key, passed: gate.passed, code: gate.code, message: gate.message })) : undefined,
+  };
+}
+
+function summarizeManifest(manifest: any): unknown {
+  if (!manifest) return undefined;
+  return {
+    path: manifest.path,
+    exists: manifest.exists,
+    hash: manifest.hash,
+    entryCount: Array.isArray(manifest.entries) ? manifest.entries.length : undefined,
+    missingCount: Array.isArray(manifest.missingFiles) ? manifest.missingFiles.length : undefined,
+    issueCount: Array.isArray(manifest.issues) ? manifest.issues.length : undefined,
+    summary: manifest.summary,
+  };
 }
 
 function decorateRunOutput(output: WorkflowRunOutput, startedAt: number): WorkflowRunOutput {

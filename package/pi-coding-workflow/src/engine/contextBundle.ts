@@ -3,6 +3,7 @@ import { evaluatePrdChecklistGate, prdGateToBlocker, readPrdKernel, type PrdKern
 import { manifestFiles, manifestIssuesToBlockers, manifestIssuesToWarnings, readTaskManifests, type WorkflowManifestSummary } from "./manifest.ts";
 import { readWorkspaceSummary, type WorkspaceSummary } from "./workspace.ts";
 import type { WorkflowTaskJson } from "./task.ts";
+import { grillStartBlockers } from "./grill.ts";
 
 export interface WorkflowContextBundle {
   mode: ContextMode;
@@ -64,6 +65,7 @@ function contextBlockers(
   }
 
   if (task.status === "planning") {
+    blockers.push(...grillStartBlockers(task));
     if (prd.quality.hasTodo) blockers.push({ code: "prd_todo_present", message: "PRD contains TODO/TBD markers; resolve before start_checked.", severity: "blocking", path: prd.source.path });
     if (prd.openQuestions.blocking) blockers.push({ code: "prd_open_questions_blocking", message: `PRD has blocking open questions: ${prd.openQuestions.summary}`, severity: "blocking", path: prd.source.path });
     if (!prd.finalConfirmation.confirmed) blockers.push({ code: "prd_final_confirmation_missing", message: "PRD final confirmation is missing or not confirmed.", severity: "blocking", path: prd.source.path });
