@@ -15,7 +15,7 @@
 
 ## 核心目标
 
-- 只暴露两个 LLM 可见工具：`workflow_next` 和 `workflow_run`。
+- 只暴露三个 LLM 可见工具：`workflow_next`、`workflow_delegate` 和 `workflow_run`。
 - 将复杂工作流逻辑放在本地确定性引擎中，减少模型往返和 token 消耗。
 - 默认返回轻量上下文，通过证据引用按需展开详情。
 - 支持通用项目与 Unity 项目的 `.workflow` 初始化。
@@ -71,6 +71,31 @@ npm install @leo-yjl/pi-coding-workflow
 { "includeContext": "task" }
 ```
 
+
+### `workflow_delegate`
+
+受控 subagent 执行工具。仅当 `workflow_next` 的 `adaptiveControl.strategy` 推荐 `subagent_brief` 时使用。它会创建隔离的 in-memory agent session，按 `research` / `implement` / `check` / `finish` 角色执行有预算限制的子任务，并把完整过程写入 artifact，主上下文只返回 compact summary。
+
+关键约束：
+
+- 默认 `mode: "dry_run"`，只规划不启动 subagent。
+- `execute` 使用独立短上下文，不继承主会话长历史。
+- 有 `maxTurns`、`maxToolCalls`、`maxInputTokens`、`maxOutputTokens` 预算。
+- 有 `writePolicy`: `report_only`、`task_files_only`、`manifest_only`。
+- subagent 内部的 `workflow_run` 只能 dry-run；最终状态推进仍由主流程调用 `workflow_run`。
+- 返回 `artifactRef`、`metrics`、`changedFiles`、`blockedBy`、`recommendedNext`。
+
+常见调用：
+
+```json
+{
+  "agent": "implement",
+  "mode": "dry_run",
+  "task": "06-14-example",
+  "writePolicy": "manifest_only"
+}
+```
+
 ### `workflow_run`
 
 受控的工作流执行工具。
@@ -81,6 +106,7 @@ npm install @leo-yjl/pi-coding-workflow
 create_from_grill
 create_child
 record_grill_decision
+record_round_and_update_prd
 append_prd_decisions
 update_prd_section
 finalize_grill
@@ -97,6 +123,7 @@ batch
 - 默认 `detail: "lite"`；`start_checked` / `finish_run` / `checkpoint` 的完整 preflight details 会写入 `.workflow/.runtime/preflight/*.json`，工具结果只返回 `preflightRef`。需要内联详情时显式传 `detail: "summary"` 或 `detail: "full"`。
 - 修改 task 状态需要 `mode: "execute"`。
 - `record_grill_decision` / `finalize_grill` 记录并收口 Stage 1 grill；所有未 finalized 的 planning task 会被 `start_checked` 阻止。
+- `record_round_and_update_prd` 在一次 `workflow_run` 中记录一轮业务 decisions、更新 PRD section，并默认追加缺失的 `## Grill Decision Log` 行；这是 grill 后的低 token 默认路径。
 - Stage 1 grill 现在区分 `decisionCount` 与 `askRounds`：同一轮用户问答产生的多个 decision 应共享 `roundId`，`batch` 中未显式传 `roundId` 的 `record_grill_decision` 会被视为同一轮。
 - `append_prd_decisions` 会把已记录但尚未写入 PRD 的业务 decision 追加到 `## Grill Decision Log`，用于确定性固化 “grill → 写 PRD” 步骤。
 - `update_prd_section` 可确定性 replace/append 指定 PRD section（如 Requirements、Acceptance Criteria、Validation Plan、Open Questions），减少手工 edit 风险。
@@ -145,7 +172,7 @@ batch
 - `tokenBudget`
 - `meta`
 - fingerprint-backed workflow cache
-- telemetry warnings for repeated `workflow_next` / `workflow_run` calls and high estimated token usage
+- telemetry warnings for repeated `workflow_next` / `workflow_run` / `workflow_delegate` calls and high estimated token usage
 
 ### Adaptive Control
 
@@ -171,7 +198,7 @@ research | implement | check | finish | user | none
 .workflow/.runtime/telemetry/
 ```
 
-用于记录 token 估算、cache hit、blocker/warning、artifact refs、transaction 和耗时。
+用于记录 token 估算、cache hit、blocker/warning、artifact refs、transaction、delegate run 和耗时。
 
 ### Compaction
 
@@ -256,7 +283,7 @@ npm run replay:history -- <project-root> --variants as_is,planning,in_progress
 
 ## Goals
 
-- Expose only two LLM-visible tools: `workflow_next` and `workflow_run`.
+- Expose only three LLM-visible tools: `workflow_next`, `workflow_delegate` and `workflow_run`.
 - Move complex workflow behavior into a deterministic local engine to reduce model round trips and token usage.
 - Return lightweight context by default and expose detailed evidence only when requested.
 - Support `.workflow` initialization for generic and Unity projects.
@@ -312,6 +339,31 @@ Request more detail only when needed:
 { "includeContext": "task" }
 ```
 
+
+### `workflow_delegate`
+
+Controlled subagent runner. Use it only when `workflow_next` recommends `adaptiveControl.strategy=subagent_brief`. It creates an isolated in-memory agent session for `research` / `implement` / `check` / `finish`, enforces budgets, writes full details to artifacts, and returns only a compact summary to the parent context.
+
+Key constraints:
+
+- Defaults to `mode: "dry_run"`; dry-run plans the delegate without starting a subagent.
+- `execute` uses a fresh short context instead of inheriting the parent session history.
+- Budgets: `maxTurns`, `maxToolCalls`, `maxInputTokens`, `maxOutputTokens`.
+- Write policies: `report_only`, `task_files_only`, `manifest_only`.
+- Subagent `workflow_run` calls are dry-run only; parent workflow still owns deterministic state transitions.
+- Returns `artifactRef`, `metrics`, `changedFiles`, `blockedBy`, and `recommendedNext`.
+
+Example:
+
+```json
+{
+  "agent": "implement",
+  "mode": "dry_run",
+  "task": "06-14-example",
+  "writePolicy": "manifest_only"
+}
+```
+
 ### `workflow_run`
 
 A controlled workflow actuator.
@@ -322,6 +374,7 @@ Supported actions:
 create_from_grill
 create_child
 record_grill_decision
+record_round_and_update_prd
 append_prd_decisions
 update_prd_section
 finalize_grill
@@ -338,6 +391,7 @@ Rules:
 - Defaults to `detail: "lite"`; full preflight details for `start_checked` / `finish_run` / `checkpoint` are written to `.workflow/.runtime/preflight/*.json` and returned as `preflightRef`. Pass `detail: "summary"` or `detail: "full"` when inline details are needed.
 - Task mutations require `mode: "execute"`.
 - `record_grill_decision` / `finalize_grill` record and close Stage 1 grill; `start_checked` blocks any planning task that is not finalized.
+- `record_round_and_update_prd` records one business decision round, updates PRD sections, and appends missing `## Grill Decision Log` rows in one `workflow_run` call; this is the low-token default path after a grill answer.
 - Stage 1 grill now separates `decisionCount` from `askRounds`: multiple decisions from the same user interaction should share `roundId`; `record_grill_decision` items inside one `batch` share a round by default when no explicit `roundId` is provided.
 - `append_prd_decisions` appends recorded business decisions that are still missing from the PRD into `## Grill Decision Log`, making the “grill → write PRD” step deterministic.
 - `update_prd_section` deterministically replaces/appends a target PRD section such as Requirements, Acceptance Criteria, Validation Plan or Open Questions, reducing manual edit risk.
@@ -386,7 +440,7 @@ The engine supports:
 - `tokenBudget`
 - `meta`
 - fingerprint-backed workflow cache
-- telemetry warnings for repeated `workflow_next` / `workflow_run` calls and high estimated token usage
+- telemetry warnings for repeated `workflow_next` / `workflow_run` / `workflow_delegate` calls and high estimated token usage
 
 ### Adaptive Control
 
@@ -412,7 +466,7 @@ Tool calls write schema-versioned telemetry JSONL under:
 .workflow/.runtime/telemetry/
 ```
 
-Telemetry records token estimates, cache hits, blockers/warnings, artifact refs, transactions and elapsed time.
+Telemetry records token estimates, cache hits, blockers/warnings, artifact refs, transactions, delegate runs and elapsed time.
 
 ### Compaction
 

@@ -64,6 +64,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   const telemetrySummary = await readWorkflowTelemetrySummary(root, task.id);
   const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent })) : undefined;
   const context = bundle ? contextFromBundle(bundle, input.detail, adaptiveControl) : undefined;
+  const recommendedTool = adaptiveControl?.strategy === "subagent_brief" && adaptiveControl.delegateRecommendedCall ? adaptiveControl.delegateRecommendedCall : next.recommendedTool;
   const output: WorkflowNextOutput = {
     ok: true,
     status: task.status,
@@ -71,7 +72,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     stage: task.stage,
     flowLevel: task.flowLevel,
     nextAction: next.nextAction,
-    recommendedTool: next.recommendedTool,
+    recommendedTool,
     blockedBy: bundle?.blockedBy ?? [],
     warnings: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings],
     context,

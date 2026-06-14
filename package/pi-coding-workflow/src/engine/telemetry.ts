@@ -1,14 +1,14 @@
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { WorkflowNextOutput, WorkflowRunOutput, WorkflowWarning } from "../types.ts";
+import type { WorkflowDelegateOutput, WorkflowNextOutput, WorkflowRunOutput, WorkflowWarning } from "../types.ts";
 import { normalizeSlash, resolveInsideRoot } from "../safety/pathPolicy.ts";
 
 const TELEMETRY_SCHEMA_VERSION = 1;
 const PACKAGE_VERSION = "0.1.0";
 const MAX_TELEMETRY_FILE_BYTES = 512 * 1024;
 
-export type WorkflowTelemetryEventName = "workflow_next" | "workflow_run";
+export type WorkflowTelemetryEventName = "workflow_next" | "workflow_run" | "workflow_delegate";
 
 export interface WorkflowTelemetryEvent {
   schemaVersion: 1;
@@ -47,27 +47,31 @@ export interface WorkflowTelemetrySummary {
   task?: string;
   workflowNextCount: number;
   workflowRunCount: number;
+  workflowDelegateCount: number;
   estimatedTokens: number;
   warnings: WorkflowWarning[];
 }
 
 const WARN_WORKFLOW_NEXT_COUNT = 12;
 const WARN_WORKFLOW_RUN_COUNT = 24;
+const WARN_WORKFLOW_DELEGATE_COUNT = 8;
 const WARN_ESTIMATED_TOKENS = 80_000;
 
 export async function readWorkflowTelemetrySummary(root: string, task?: string): Promise<WorkflowTelemetrySummary> {
   const events = await readRecentTelemetryEvents(root, task);
   const workflowNextCount = events.filter((event) => event.event === "workflow_next").length;
   const workflowRunCount = events.filter((event) => event.event === "workflow_run").length;
+  const workflowDelegateCount = events.filter((event) => event.event === "workflow_delegate").length;
   const estimatedTokens = events.reduce((sum, event) => sum + (Number.isFinite(event.estimatedTokens) ? event.estimatedTokens ?? 0 : 0), 0);
   const warnings: WorkflowWarning[] = [];
   if (workflowNextCount >= WARN_WORKFLOW_NEXT_COUNT) warnings.push({ code: "workflow_next_repeated", message: `workflow_next has been called ${workflowNextCount} time(s) for ${task ?? "this workspace"}; consider batching deterministic steps or using cached evidence refs.` });
   if (workflowRunCount >= WARN_WORKFLOW_RUN_COUNT) warnings.push({ code: "workflow_run_repeated", message: `workflow_run has been called ${workflowRunCount} time(s) for ${task ?? "this workspace"}; consider combining deterministic actions with batch.` });
+  if (workflowDelegateCount >= WARN_WORKFLOW_DELEGATE_COUNT) warnings.push({ code: "workflow_delegate_repeated", message: `workflow_delegate has been called ${workflowDelegateCount} time(s) for ${task ?? "this workspace"}; narrow the delegate objective or continue manually from the artifact summary.` });
   if (estimatedTokens >= WARN_ESTIMATED_TOKENS) warnings.push({ code: "workflow_estimated_tokens_high", message: `Workflow telemetry estimated ${estimatedTokens} tokens for ${task ?? "this workspace"}; consider compaction or a fresh task/session.` });
-  return { task, workflowNextCount, workflowRunCount, estimatedTokens, warnings };
+  return { task, workflowNextCount, workflowRunCount, workflowDelegateCount, estimatedTokens, warnings };
 }
 
-export async function writeWorkflowTelemetry(root: string, event: WorkflowTelemetryEventName, output: WorkflowNextOutput | WorkflowRunOutput): Promise<WorkflowTelemetryWriteResult> {
+export async function writeWorkflowTelemetry(root: string, event: WorkflowTelemetryEventName, output: WorkflowNextOutput | WorkflowRunOutput | WorkflowDelegateOutput): Promise<WorkflowTelemetryWriteResult> {
   try {
     if (!existsSync(resolveInsideRoot(root, ".workflow"))) {
       return { ok: false, skippedReason: "workflow_dir_missing" };
@@ -116,10 +120,11 @@ async function readRecentTelemetryEvents(root: string, task?: string): Promise<W
   }
 }
 
-function toTelemetryEvent(event: WorkflowTelemetryEventName, output: WorkflowNextOutput | WorkflowRunOutput): WorkflowTelemetryEvent {
+function toTelemetryEvent(event: WorkflowTelemetryEventName, output: WorkflowNextOutput | WorkflowRunOutput | WorkflowDelegateOutput): WorkflowTelemetryEvent {
   const run = "action" in output ? output : undefined;
   const next = "recommendedTool" in output ? output : undefined;
-  const artifactRefs = run?.artifacts?.map((artifact) => artifact.ref) ?? (run?.artifactRef ? [run.artifactRef] : []);
+  const delegate = "runId" in output ? output : undefined;
+  const artifactRefs = run?.artifacts?.map((artifact) => artifact.ref) ?? delegate?.artifacts?.map((artifact) => artifact.ref) ?? (run?.artifactRef ? [run.artifactRef] : delegate?.artifactRef ? [delegate.artifactRef] : []);
   const omittedRefs = output.meta?.omittedRefs
     ?? next?.omitted?.map((item) => item.ref)
     ?? next?.context?.omitted?.map((item) => item.ref)

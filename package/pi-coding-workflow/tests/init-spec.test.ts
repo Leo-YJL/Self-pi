@@ -12,6 +12,7 @@ import { resolveInsideRoot } from "../src/safety/pathPolicy.ts";
 import { writeJsonArtifact } from "../src/artifacts/writeToolResult.ts";
 import { workflowNext } from "../src/engine/route.ts";
 import { workflowRun } from "../src/engine/run.ts";
+import { workflowDelegate } from "../src/engine/delegate.ts";
 import { prdConfirmationHash, readPrdKernel } from "../src/engine/prd.ts";
 import { readManifest } from "../src/engine/manifest.ts";
 import { confirmPrdFinal } from "../src/engine/prdConfirm.ts";
@@ -291,7 +292,7 @@ test("workflow_next defaults to lite context with budget metadata", async () => 
   assert.equal(cached.meta?.cacheHit, true);
 });
 
-test("workflow_next adaptive control emits implement subagent brief after start", async () => {
+test("workflow_next adaptive control emits implement subagent brief and delegate recommendation after start", async () => {
   const root = await mkdtemp(join(tmpdir(), "pcw-adaptive-implement-"));
   await executeInitWorkspace(root, "generic");
   const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Adaptive Implement", level: "complex", slug: "adaptive-implement" });
@@ -303,7 +304,15 @@ test("workflow_next adaptive control emits implement subagent brief after start"
   assert.equal(next.adaptiveControl?.strategy, "subagent_brief");
   assert.equal(next.adaptiveControl?.recommendedAgent, "implement");
   assert.equal(next.adaptiveControl?.subagentBriefs[0]?.agent, "implement");
+  assert.equal(next.adaptiveControl?.delegateRecommendedCall?.name, "workflow_delegate");
+  assert.equal(next.recommendedTool?.name, "workflow_delegate");
   assert.ok(next.adaptiveControl?.subagentBriefs[0]?.instructions.some((line) => line.includes("manifest")));
+
+  const delegate = await workflowDelegate(root, { task: create.task, agent: "implement", mode: "dry_run" });
+  assert.equal(delegate.ok, true);
+  assert.equal(delegate.status, "planned");
+  assert.equal(delegate.recommendedNext?.name, "workflow_run");
+  assert.ok(delegate.artifactRef?.includes(".workflow/.runtime/agents/"));
 });
 
 test("workflow_next adaptive control prefers deterministic finish preflight", async () => {
@@ -520,6 +529,76 @@ test("update_prd_section replaces and appends deterministic PRD sections", async
   const prd = await readFile(join(root, ".workflow/tasks", create.task!, "prd.md"), "utf8");
   assert.match(prd, /R1: Deterministic PRD updates/);
   assert.match(prd, /R2: Append mode preserves previous requirements/);
+});
+
+test("record_round_and_update_prd records decisions, updates PRD and enables finalize", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-record-round-prd-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Composite Round", level: "standard", slug: "composite-round" });
+
+  const dryRun = await workflowRun(root, {
+    action: "record_round_and_update_prd",
+    mode: "dry_run",
+    task: create.task,
+    roundId: "round-1-scope",
+    roundKind: "scope",
+    decisions: [
+      { decisionId: "composite.scope", decisionSource: "ask_user_question", decisionSeverity: "blocking", decisionSummary: "Scope approved for composite action.", persistTo: "prd" },
+    ],
+    prdUpdates: [
+      { prdSection: "requirements", prdContent: "- R1: Composite action records and writes PRD in one call." },
+    ],
+  });
+  assert.equal(dryRun.ok, true);
+  assert.equal(dryRun.mutated, false);
+
+  const scope = await workflowRun(root, {
+    action: "record_round_and_update_prd",
+    mode: "execute",
+    task: create.task,
+    roundId: "round-1-scope",
+    roundKind: "scope",
+    decisions: [
+      { decisionId: "composite.scope", decisionSource: "ask_user_question", decisionSeverity: "blocking", decisionSummary: "Scope approved for composite action.", persistTo: "prd" },
+    ],
+    prdUpdates: [
+      { prdSection: "executionContract", prdContent: "- Flow Level: standard\n- Outcome: Composite round PRD is implementation-ready." },
+      { prdSection: "goal", prdContent: "Use one workflow_run call per business round for deterministic PRD intake." },
+      { prdSection: "requirements", prdContent: "- R1: Composite action records decisions and updates PRD sections in one call." },
+      { prdSection: "openQuestions", prdContent: "None." },
+    ],
+  });
+  assert.equal(scope.ok, true);
+  assert.equal(scope.mutated, true);
+
+  const runtime = await workflowRun(root, {
+    action: "record_round_and_update_prd",
+    mode: "execute",
+    task: create.task,
+    roundId: "round-2-runtime",
+    roundKind: "runtime",
+    decisions: [
+      { decisionId: "composite.runtime", decisionSource: "ask_user_question", decisionSeverity: "blocking", decisionSummary: "Runtime behavior approved for composite action.", persistTo: "prd" },
+    ],
+    prdUpdates: [
+      { prdSection: "acceptanceCriteria", prdContent: "- [ ] Composite action output lists recorded decisions and changed PRD sections." },
+      { prdSection: "validationPlan", prdContent: "- [ ] npm test" },
+      { prdSection: "definitionOfDone", prdContent: "- [ ] PRD decision log includes both composite decisions." },
+      { prdSection: "outOfScope", prdContent: "- Final PRD confirmation remains a separate command." },
+      { prdSection: "architectureImpact", prdContent: "Workflow engine adds a composite action under workflow_run; no new top-level tool." },
+    ],
+  });
+  assert.equal(runtime.ok, true);
+
+  const prd = await readFile(join(root, ".workflow/tasks", create.task!, "prd.md"), "utf8");
+  assert.match(prd, /composite\.scope/);
+  assert.match(prd, /composite\.runtime/);
+  assert.match(prd, /Composite action records decisions/);
+
+  const confirmed = await confirmPrdFinal(root, { task: create.task, mode: "execute", message: "User approved composite round PRD." });
+  assert.equal(confirmed.ok, true);
+  const finalize = await workflowRun(root, { action: "finalize_grill", mode: "execute", task: create.task, userConfirmed: true, decisionSource: "ask_user_question", notes: "User confirmed PRD." });
+  assert.equal(finalize.ok, true);
 });
 
 test("append_prd_decisions writes grill log and enables multi-round finalize", async () => {

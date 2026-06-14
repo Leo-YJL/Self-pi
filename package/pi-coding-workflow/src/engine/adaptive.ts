@@ -66,6 +66,7 @@ export function buildAdaptiveControl(input: AdaptiveInput): WorkflowAdaptiveCont
   const risk = riskFor(input.bundle, blockers, warnings);
   const reasons = reasonLines(input, recommendedAgent, codes, blockers, warnings);
   const decisionCardHints = shouldAskUser ? decisionCardHintsFor(input, blockers, codes) : [];
+  const delegateRecommendedCall = shouldSpawnSubagent ? delegateCallFor(recommendedAgent, input) : undefined;
 
   return {
     strategy: shouldAskUser
@@ -81,6 +82,7 @@ export function buildAdaptiveControl(input: AdaptiveInput): WorkflowAdaptiveCont
     reasons,
     deterministicActions,
     subagentBriefs: shouldSpawnSubagent ? [briefFor(recommendedAgent, input, codes, evidenceRefs)] : [],
+    delegateRecommendedCall,
     decisionCardHints,
     stopConditions: stopConditionsFor(input.bundle, blockers),
   };
@@ -165,6 +167,22 @@ function decisionCardHintsFor(input: AdaptiveInput, blockers: WorkflowBlocker[],
   }
 
   return [];
+}
+
+function delegateCallFor(agent: Exclude<WorkflowAdaptiveControl["recommendedAgent"], "none" | "user">, input: AdaptiveInput): WorkflowRecommendedCall {
+  const includeContext = agent === "finish" ? "finish" : agent === "check" ? "check" : agent === "research" ? "brief" : "task";
+  const writePolicy = agent === "implement" ? "manifest_only" : "report_only";
+  return {
+    name: "workflow_delegate",
+    arguments: {
+      task: input.bundle.task.id,
+      agent,
+      mode: "dry_run",
+      includeContext,
+      detail: "summary",
+      writePolicy,
+    },
+  };
 }
 
 function chooseAgent(input: AdaptiveInput, codes: string[], blockers: WorkflowBlocker[]): WorkflowAdaptiveControl["recommendedAgent"] {

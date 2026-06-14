@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { workflowNext } from "./engine/route.ts";
 import { workflowRun } from "./engine/run.ts";
+import { workflowDelegate } from "./engine/delegate.ts";
 import { executeInitWorkspace, planInitWorkspace } from "./init/initWorkspace.ts";
 import { initSpecDryRun, initSpecExecute } from "./init/initSpec.ts";
 import { parseArgs, parseAnswers } from "./commands/args.ts";
@@ -10,12 +11,13 @@ import { confirmPrdFinal } from "./engine/prdConfirm.ts";
 import { buildWorkflowCompactionSummary } from "./engine/compaction.ts";
 
 const PROFILE_VALUES = ["generic", "unity"] as const;
-const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "append_prd_decisions", "update_prd_section", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive"] as const;
+const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "record_round_and_update_prd", "append_prd_decisions", "update_prd_section", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive"] as const;
 const ACTION_VALUES = [...SINGLE_ACTION_VALUES, "batch"] as const;
 const FLOW_VALUES = ["simple", "standard", "complex", "goal"] as const;
 const CONTEXT_VALUES = ["none", "lite", "brief", "task", "check", "finish"] as const;
 const DETAIL_VALUES = ["lite", "summary", "normal", "full"] as const;
 const RUN_DETAIL_VALUES = ["lite", "summary", "full"] as const;
+const DELEGATE_WRITE_POLICY_VALUES = ["report_only", "task_files_only", "manifest_only"] as const;
 const GRILL_DECISION_SEVERITY_VALUES = ["blocking", "non_blocking"] as const;
 const GRILL_DECISION_STATUS_VALUES = ["answered", "unanswered", "skipped"] as const;
 const GRILL_DECISION_SOURCE_VALUES = ["ask_user_question", "user", "command", "fast_path", "agent"] as const;
@@ -23,6 +25,23 @@ const GRILL_PERSIST_VALUES = ["prd", "spec", "none"] as const;
 const GRILL_ROUND_KIND_VALUES = ["scope", "runtime", "validation", "final_confirmation", "custom"] as const;
 const PRD_SECTION_VALUES = ["executionContract", "goal", "requirements", "acceptanceCriteria", "validationPlan", "openQuestions", "finalConfirmation", "outOfScope", "definitionOfDone", "grillResult", "architectureImpact"] as const;
 const PRD_UPDATE_MODE_VALUES = ["replace", "append"] as const;
+
+const WorkflowRoundDecisionSchema = Type.Object({
+  decisionId: Type.String(),
+  decisionSummary: Type.String(),
+  decisionSeverity: Type.Optional(StringEnum(GRILL_DECISION_SEVERITY_VALUES)),
+  decisionStatus: Type.Optional(StringEnum(GRILL_DECISION_STATUS_VALUES)),
+  decisionSource: Type.Optional(StringEnum(GRILL_DECISION_SOURCE_VALUES)),
+  persistTo: Type.Optional(StringEnum(GRILL_PERSIST_VALUES)),
+  roundId: Type.Optional(Type.String()),
+  roundKind: Type.Optional(StringEnum(GRILL_ROUND_KIND_VALUES)),
+});
+
+const WorkflowPrdSectionUpdateSchema = Type.Object({
+  prdSection: StringEnum(PRD_SECTION_VALUES),
+  prdContent: Type.String(),
+  prdUpdateMode: Type.Optional(StringEnum(PRD_UPDATE_MODE_VALUES)),
+});
 
 const WorkflowRunBatchItemSchema = Type.Object({
   action: StringEnum(SINGLE_ACTION_VALUES),
@@ -50,6 +69,9 @@ const WorkflowRunBatchItemSchema = Type.Object({
   prdSection: Type.Optional(StringEnum(PRD_SECTION_VALUES)),
   prdContent: Type.Optional(Type.String()),
   prdUpdateMode: Type.Optional(StringEnum(PRD_UPDATE_MODE_VALUES)),
+  decisions: Type.Optional(Type.Array(WorkflowRoundDecisionSchema)),
+  prdUpdates: Type.Optional(Type.Array(WorkflowPrdSectionUpdateSchema)),
+  appendPrdDecisions: Type.Optional(Type.Boolean()),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -86,6 +108,35 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "workflow_delegate",
+    label: "Workflow Delegate",
+    description: "Bounded subagent runner for workflow research/implement/check/finish work. Uses isolated in-memory context, tool budgets, path policy, and returns compact artifact-backed summaries.",
+    promptSnippet: "Run a bounded workflow subagent when workflow_next adaptiveControl recommends delegation.",
+    promptGuidelines: ["Use workflow_delegate only when workflow_next recommends adaptiveControl.strategy=subagent_brief; run dry_run first for planning, execute for bounded delegated work, then use workflow_run for deterministic preflight/state changes."],
+    parameters: Type.Object({
+      task: Type.Optional(Type.String()),
+      agent: StringEnum(["research", "implement", "check", "finish"] as const),
+      mode: Type.Optional(StringEnum(["dry_run", "execute"] as const)),
+      objective: Type.Optional(Type.String()),
+      includeContext: Type.Optional(StringEnum(CONTEXT_VALUES)),
+      detail: Type.Optional(StringEnum(DETAIL_VALUES)),
+      maxTurns: Type.Optional(Type.Number()),
+      maxToolCalls: Type.Optional(Type.Number()),
+      maxInputTokens: Type.Optional(Type.Number()),
+      maxOutputTokens: Type.Optional(Type.Number()),
+      writePolicy: Type.Optional(StringEnum(DELEGATE_WRITE_POLICY_VALUES)),
+      allowedPaths: Type.Optional(Type.Array(Type.String())),
+      stopOnToolBudget: Type.Optional(Type.Boolean()),
+      stopOnTokenBudget: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const output = await workflowDelegate(ctx.cwd, params as any);
+      appendWorkflowEntry(pi, "workflow_delegate", output);
+      return { content: [{ type: "text", text: JSON.stringify(output) }], details: output };
+    },
+  });
+
+  pi.registerTool({
     name: "workflow_run",
     label: "Workflow Run",
     description: "Controlled workflow stage actuator. Dry-run by default; supports action=batch with actions[] for deterministic transactions.",
@@ -117,6 +168,9 @@ export default function (pi: ExtensionAPI) {
       prdSection: Type.Optional(StringEnum(PRD_SECTION_VALUES)),
       prdContent: Type.Optional(Type.String()),
       prdUpdateMode: Type.Optional(StringEnum(PRD_UPDATE_MODE_VALUES)),
+      decisions: Type.Optional(Type.Array(WorkflowRoundDecisionSchema)),
+      prdUpdates: Type.Optional(Type.Array(WorkflowPrdSectionUpdateSchema)),
+      appendPrdDecisions: Type.Optional(Type.Boolean()),
       actions: Type.Optional(Type.Array(WorkflowRunBatchItemSchema)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -184,7 +238,7 @@ async function selectProfile(rawProfile: string | boolean | undefined, ctx: { ha
   return "generic";
 }
 
-function appendWorkflowEntry(pi: ExtensionAPI, kind: "workflow_next" | "workflow_run", output: any): void {
+function appendWorkflowEntry(pi: ExtensionAPI, kind: "workflow_next" | "workflow_run" | "workflow_delegate", output: any): void {
   try {
     pi.appendEntry("pi-coding-workflow", {
       kind,
@@ -193,6 +247,8 @@ function appendWorkflowEntry(pi: ExtensionAPI, kind: "workflow_next" | "workflow
       stage: output.stage,
       flowLevel: output.flowLevel,
       action: output.action,
+      agent: output.agent,
+      runId: output.runId,
       mode: output.mode,
       nextAction: output.nextAction,
       recommendedTool: output.recommendedTool,
@@ -200,6 +256,7 @@ function appendWorkflowEntry(pi: ExtensionAPI, kind: "workflow_next" | "workflow
       evidenceRefs: output.evidenceRefs ?? output.context?.evidenceRefs,
       omittedRefs: output.omitted?.map((item: any) => item.ref) ?? output.context?.omitted?.map((item: any) => item.ref),
       artifactRefs: output.artifacts?.map((artifact: any) => artifact.ref) ?? (output.artifactRef ? [output.artifactRef] : []),
+      changedFiles: output.changedFiles,
       tokenBudget: output.tokenBudget ?? output.context?.tokenBudget,
       meta: output.meta,
       createdAt: new Date().toISOString(),

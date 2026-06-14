@@ -6,6 +6,8 @@ export type ContextMode = "none" | "lite" | "brief" | "task" | "check" | "finish
 export type DetailMode = "lite" | "summary" | "normal" | "full";
 export type RunDetailMode = "lite" | "summary" | "full";
 export type RunMode = "dry_run" | "execute";
+export type DelegateWritePolicy = "report_only" | "task_files_only" | "manifest_only";
+export type WorkflowDelegateStatus = "planned" | "completed" | "blocked" | "needs_user" | "needs_parent_action" | "failed" | "budget_exceeded";
 export type ProfileName = "generic" | "unity";
 
 export interface WorkflowBlocker {
@@ -85,6 +87,7 @@ export interface WorkflowAdaptiveControl {
   reasons: string[];
   deterministicActions: WorkflowRecommendedCall[];
   subagentBriefs: WorkflowSubagentBrief[];
+  delegateRecommendedCall?: WorkflowRecommendedCall;
   decisionCardHints?: WorkflowDecisionCardHint[];
   stopConditions: string[];
 }
@@ -115,7 +118,7 @@ export interface WorkflowNextOutput {
   stage?: WorkflowStage;
   flowLevel?: FlowLevel;
   nextAction: "no_task_grill" | "start_checked" | "implement_slice" | "checkpoint" | "finish_dry_run" | "ask_user" | "blocked" | "none";
-  recommendedTool?: { name: "workflow_run"; arguments: Partial<WorkflowRunInput> };
+  recommendedTool?: WorkflowRecommendedCall;
   blockedBy: WorkflowBlocker[];
   warnings: WorkflowWarning[];
   context?: WorkflowContextSummary;
@@ -178,9 +181,26 @@ export interface WorkflowGrillState {
   finalizedAt?: string;
 }
 
-export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "append_prd_decisions" | "update_prd_section" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "batch";
+export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "record_round_and_update_prd" | "append_prd_decisions" | "update_prd_section" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "batch";
 export type WorkflowRunSingleAction = Exclude<WorkflowRunAction, "batch">;
 export type WorkflowPrdUpdateMode = "replace" | "append";
+
+export interface WorkflowRoundDecisionInput {
+  decisionId: string;
+  decisionSummary: string;
+  decisionSeverity?: WorkflowGrillDecisionSeverity;
+  decisionStatus?: WorkflowGrillDecisionStatus;
+  decisionSource?: WorkflowGrillDecisionSource;
+  persistTo?: "prd" | "spec" | "none";
+  roundId?: string;
+  roundKind?: WorkflowGrillRoundKind;
+}
+
+export interface WorkflowPrdSectionUpdateInput {
+  prdSection: string;
+  prdContent: string;
+  prdUpdateMode?: WorkflowPrdUpdateMode;
+}
 
 export interface WorkflowRunBatchItem {
   action: WorkflowRunSingleAction;
@@ -208,6 +228,9 @@ export interface WorkflowRunBatchItem {
   prdSection?: string;
   prdContent?: string;
   prdUpdateMode?: WorkflowPrdUpdateMode;
+  decisions?: WorkflowRoundDecisionInput[];
+  prdUpdates?: WorkflowPrdSectionUpdateInput[];
+  appendPrdDecisions?: boolean;
 }
 
 export interface WorkflowRunInput {
@@ -236,6 +259,9 @@ export interface WorkflowRunInput {
   prdSection?: string;
   prdContent?: string;
   prdUpdateMode?: WorkflowPrdUpdateMode;
+  decisions?: WorkflowRoundDecisionInput[];
+  prdUpdates?: WorkflowPrdSectionUpdateInput[];
+  appendPrdDecisions?: boolean;
   /** Internal evidence captured by workflow_run before recording a decision. */
   prdHashBefore?: string;
   /** Internal evidence captured by workflow_run before recording a decision. */
@@ -275,8 +301,50 @@ export interface WorkflowTransaction {
 }
 
 export interface WorkflowRecommendedCall {
-  name: "workflow_next" | "workflow_run";
+  name: "workflow_next" | "workflow_run" | "workflow_delegate";
   arguments: Record<string, unknown>;
+}
+
+export interface WorkflowDelegateInput {
+  task?: string;
+  agent: WorkflowAgent;
+  mode?: RunMode;
+  objective?: string;
+  includeContext?: ContextMode;
+  detail?: DetailMode;
+  maxTurns?: number;
+  maxToolCalls?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  writePolicy?: DelegateWritePolicy;
+  allowedPaths?: string[];
+  stopOnToolBudget?: boolean;
+  stopOnTokenBudget?: boolean;
+}
+
+export interface WorkflowDelegateOutput {
+  ok: boolean;
+  task?: string;
+  agent: WorkflowAgent;
+  mode: RunMode;
+  status: WorkflowDelegateStatus;
+  runId: string;
+  summary: string;
+  changedFiles: string[];
+  evidenceRefs: string[];
+  artifactRef?: string;
+  artifacts?: WorkflowArtifactRef[];
+  metrics: {
+    turns: number;
+    toolCalls: number;
+    estimatedInputTokens: number;
+    estimatedOutputTokens: number;
+    truncated: boolean;
+  };
+  blockedBy: WorkflowBlocker[];
+  warnings: WorkflowWarning[];
+  recommendedNext?: WorkflowRecommendedCall;
+  meta?: WorkflowResultMeta;
 }
 
 export interface WorkflowRunOutput {
