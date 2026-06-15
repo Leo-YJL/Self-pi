@@ -216,7 +216,10 @@ test("workflow_next detects active planning and in-progress tasks", async () => 
   assert.ok(blockerCodes(next).includes("grill_not_finalized"));
   assert.ok(blockerCodes(next).includes("prd_todo_present"));
   assert.equal(next.adaptiveControl?.strategy, "ask_user");
-  assert.equal(next.adaptiveControl?.decisionCardHints?.[0]?.header, "Grill Round");
+  assert.equal(next.adaptiveControl?.decisionCardAvailable, true);
+  assert.ok(next.adaptiveControl?.decisionCardIds?.[0]?.includes("grill-next-round"));
+  const nextWithCard = await workflowNext(root, { includeContext: "brief", detail: "normal" });
+  assert.equal(nextWithCard.adaptiveControl?.decisionCardHints?.[0]?.header, "Grill Round");
 
   const blockedStartDryRun = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(blockedStartDryRun.ok, false);

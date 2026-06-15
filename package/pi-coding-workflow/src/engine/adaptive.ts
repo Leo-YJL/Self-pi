@@ -88,7 +88,25 @@ export function buildAdaptiveControl(input: AdaptiveInput): WorkflowAdaptiveCont
   };
 }
 
-export function compactAdaptiveControl(control: WorkflowAdaptiveControl): WorkflowAdaptiveControl {
+export function compactAdaptiveControl(control: WorkflowAdaptiveControl, options: { signal?: boolean; includeDecisionCards?: boolean } = {}): WorkflowAdaptiveControl {
+  const decisionCardHints = options.includeDecisionCards ? control.decisionCardHints?.slice(0, 3) : undefined;
+  const decisionCardIds = control.decisionCardHints?.map((card) => card.decisionId).slice(0, 6) ?? [];
+  if (options.signal) {
+    return {
+      strategy: control.strategy,
+      recommendedAgent: control.recommendedAgent,
+      risk: control.risk,
+      confidence: control.confidence,
+      reasons: [],
+      deterministicActions: control.deterministicActions.slice(0, 1),
+      subagentBriefs: [],
+      delegateRecommendedCall: control.delegateRecommendedCall,
+      decisionCardHints,
+      decisionCardAvailable: decisionCardIds.length > 0,
+      decisionCardIds,
+      stopConditions: [],
+    };
+  }
   return {
     ...control,
     reasons: control.reasons.slice(0, 5),
@@ -99,7 +117,9 @@ export function compactAdaptiveControl(control: WorkflowAdaptiveControl): Workfl
       instructions: brief.instructions.slice(0, 6),
       stopConditions: brief.stopConditions.slice(0, 5),
     })).slice(0, 1),
-    decisionCardHints: control.decisionCardHints?.slice(0, 3),
+    decisionCardHints,
+    decisionCardAvailable: decisionCardIds.length > 0,
+    decisionCardIds,
     stopConditions: control.stopConditions.slice(0, 6),
   };
 }
@@ -210,7 +230,7 @@ function deterministicActionsFor(input: AdaptiveInput): WorkflowRecommendedCall[
     actions.push({ name: "workflow_run", arguments: { action, mode: "dry_run", task } });
   }
   if (input.bundle.task.status === "planning" && input.bundle.blockedBy.length === 0) {
-    actions.push({ name: "workflow_run", arguments: { action: "start_checked", mode: "dry_run", task } });
+    actions.push({ name: "workflow_run", arguments: { action: "start_checked", mode: "execute", task } });
   }
   if (input.bundle.task.status === "in_progress" && input.requestedAgent === "finish") {
     actions.push({ name: "workflow_run", arguments: { action: "finish_run", mode: "dry_run", task } });

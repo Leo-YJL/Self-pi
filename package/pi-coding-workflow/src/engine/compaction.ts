@@ -69,7 +69,7 @@ export function buildWorkflowCompactionSummary(input: WorkflowCompactionInput): 
     "</modified-files>",
     "",
     "## Next Steps",
-    `1. Resume with workflow_next${data.task ? ` for task ${data.task}` : ""} using includeContext=lite.`,
+    `1. Resume with workflow_next${data.task ? ` for task ${data.task}` : ""} using includeContext=signal, then request lite/task context only if refs are insufficient.`,
     "2. Request task/check/finish context only if evidenceRefs are insufficient.",
     "3. Use workflow_run batch for deterministic follow-up actions when possible.",
   ].filter((line): line is string => typeof line === "string");

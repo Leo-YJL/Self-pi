@@ -107,16 +107,33 @@ export async function writeTask(root: string, task: WorkflowTaskJson): Promise<v
 }
 
 export async function listRootTasks(root: string): Promise<WorkflowTaskJson[]> {
-  const tasksRoot = resolveInsideRoot(root, ".workflow/tasks");
+  return listTasksInDirectory(root, ".workflow/tasks", { skipArchive: true });
+}
+
+export async function listArchivedTasks(root: string): Promise<WorkflowTaskJson[]> {
+  return listTasksInDirectory(root, ".workflow/tasks/archive", { skipArchive: false });
+}
+
+async function listTasksInDirectory(root: string, relDir: string, options: { skipArchive: boolean }): Promise<WorkflowTaskJson[]> {
+  const tasksRoot = resolveInsideRoot(root, relDir);
   if (!existsSync(tasksRoot)) return [];
   const entries = await readdir(tasksRoot, { withFileTypes: true });
   const tasks: WorkflowTaskJson[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === "archive") continue;
-    const task = await tryReadTask(root, entry.name);
+    if (!entry.isDirectory() || (options.skipArchive && entry.name === "archive")) continue;
+    const task = await tryReadTaskAt(root, `${relDir}/${entry.name}/task.json`);
     if (task) tasks.push(task);
   }
   return tasks.sort((a, b) => timestampOf(b) - timestampOf(a));
+}
+
+async function tryReadTaskAt(root: string, relPath: string): Promise<WorkflowTaskJson | null> {
+  try {
+    const path = resolveInsideRoot(root, relPath);
+    return normalizeTask(JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>);
+  } catch {
+    return null;
+  }
 }
 
 export async function findActiveTask(root: string): Promise<WorkflowTaskJson | null> {

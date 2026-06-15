@@ -26,3 +26,4 @@ jobs:
       - run: npm install --legacy-peer-deps
       - run: npm test
       - run: npm run smoke:unity-scanner
+      - run: npm run smoke:delegate-import

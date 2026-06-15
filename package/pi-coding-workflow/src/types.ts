@@ -2,7 +2,7 @@ export type WorkflowAgent = "research" | "implement" | "check" | "finish";
 export type WorkflowStatus = "no_task" | "planning" | "in_progress" | "completed";
 export type WorkflowStage = "grill" | "execute" | "finish";
 export type FlowLevel = "simple" | "standard" | "complex" | "goal";
-export type ContextMode = "none" | "lite" | "brief" | "task" | "check" | "finish";
+export type ContextMode = "none" | "signal" | "lite" | "brief" | "task" | "check" | "finish";
 export type DetailMode = "lite" | "summary" | "normal" | "full";
 export type RunDetailMode = "lite" | "summary" | "full";
 export type RunMode = "dry_run" | "execute";
@@ -89,6 +89,8 @@ export interface WorkflowAdaptiveControl {
   subagentBriefs: WorkflowSubagentBrief[];
   delegateRecommendedCall?: WorkflowRecommendedCall;
   decisionCardHints?: WorkflowDecisionCardHint[];
+  decisionCardAvailable?: boolean;
+  decisionCardIds?: string[];
   stopConditions: string[];
 }
 
@@ -102,6 +104,7 @@ export interface WorkflowContextSummary {
   tokenBudget?: WorkflowTokenBudget;
   adaptiveControl?: WorkflowAdaptiveControl;
   details?: unknown;
+  detailRef?: string;
 }
 
 export interface WorkflowNextInput {
@@ -130,6 +133,11 @@ export interface WorkflowNextOutput {
   recommendedTool?: WorkflowRecommendedCall;
   blockedBy: WorkflowBlocker[];
   warnings: WorkflowWarning[];
+  blockedCodes?: string[];
+  warningCodes?: string[];
+  strategy?: WorkflowAdaptiveControl["strategy"];
+  recommendedAgent?: WorkflowAdaptiveControl["recommendedAgent"];
+  detailRef?: string;
   taskCandidates?: WorkflowTaskCandidate[];
   context?: WorkflowContextSummary;
   evidenceRefs?: string[];
@@ -256,6 +264,10 @@ export interface WorkflowRunBatchItem {
   implementEntries?: WorkflowManifestEntryInput[];
   checkEntries?: WorkflowManifestEntryInput[];
   overwrite?: boolean;
+  status?: WorkflowStatus | "active" | "all";
+  taskStatus?: WorkflowStatus | "active" | "all";
+  limit?: number;
+  includeArchived?: boolean;
 }
 
 export interface WorkflowRunInput {
@@ -294,6 +306,10 @@ export interface WorkflowRunInput {
   implementEntries?: WorkflowManifestEntryInput[];
   checkEntries?: WorkflowManifestEntryInput[];
   overwrite?: boolean;
+  status?: WorkflowStatus | "active" | "all";
+  taskStatus?: WorkflowStatus | "active" | "all";
+  limit?: number;
+  includeArchived?: boolean;
   /** Internal evidence captured by workflow_run before recording a decision. */
   prdHashBefore?: string;
   /** Internal evidence captured by workflow_run before recording a decision. */
@@ -410,7 +426,7 @@ export interface ProjectWorkflowConfig {
   package: { name: "pi-coding-workflow"; requiredVersion?: string };
   project: { name?: string; profile: ProfileName; root: "." };
   workflow: { defaultFlowLevel: FlowLevel; taskDir: string; specDir: string; runtimeDir: string };
-  context: { defaultMode: "lite" | "brief" | "none" | "task" | "check" | "finish"; maxSummaryChars: number; artifactMode: "summary-first" };
+  context: { defaultMode: "lite" | "brief" | "none" | "signal" | "task" | "check" | "finish"; maxSummaryChars: number; artifactMode: "summary-first" };
   git: { autoCommit: boolean; autoPush: boolean; pushConfirmation: "never" | "risky" | "always"; protectedBranches: string[]; allowBroadStage: false };
   profiles: { enabled: ProfileName[] };
 }

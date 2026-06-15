@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 - 2026-06-15
+
+### Added
+
+- Added low-token `workflow_next` signal context with `detailRef` artifacts for full context.
+- Added `list_tasks` status/limit/archive filters.
+- Added delegate SDK injection for execute-path tests and `smoke:delegate-import`.
+
+### Changed
+
+- `sync_manifest_from_diff` dry-run now reports execute requirements and validates explicit entries.
+- Adaptive deterministic start recommendations may use safe execute when gates are already clear.
+- Documentation now describes safe execute behavior and delegate budget soft limits.
+
+### Tests
+
+- Added delegate execute success, unauthorized changes, and budget exceeded tests.
+- Added signal context, manifest sync dry-run, and list task filtering tests.
+
 ## 0.2.0 - 2026-06-15
 
 ### Added

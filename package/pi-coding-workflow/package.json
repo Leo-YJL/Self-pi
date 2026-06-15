@@ -1,6 +1,6 @@
 {
   "name": "@leo-yjl/pi-coding-workflow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Generic coding workflow package for Pi with workflow_next/workflow_run tools and plan-based init-spec.",
   "keywords": [
     "pi-package",
@@ -27,8 +27,9 @@
   "scripts": {
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "smoke:unity-scanner": "node --experimental-strip-types -e \"import('./src/init/unityScanner.ts').then(()=>console.log('unity scanner import ok'))\"",
+    "smoke:delegate-import": "node --experimental-strip-types -e \"import('./src/engine/delegate.ts').then(()=>console.log('delegate import ok'))\"",
     "replay:history": "node --experimental-strip-types src/replay/historyReplay.ts",
-    "prepublishOnly": "npm test && npm run smoke:unity-scanner"
+    "prepublishOnly": "npm test && npm run smoke:unity-scanner && npm run smoke:delegate-import"
   },
   "devDependencies": {
     "@types/node": "^24.0.0"

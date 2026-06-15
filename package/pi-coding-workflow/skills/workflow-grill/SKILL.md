@@ -32,7 +32,7 @@ By the end of Stage 1 grill:
 
 ## Start sequence
 
-1. Run `workflow_next({ "includeContext": "lite" })` to detect workflow state.
+1. Run `workflow_next({ "includeContext": "signal" })` to detect workflow state with minimal token use; request `lite` or `task` context only if the signal refs are insufficient.
 2. If `.workflow/config.json` is missing, stop and tell the user to initialize workflow first (`/workflow-init --execute`, then `/workflow-init-spec --execute --plan <plan-id>` if needed). Do not create ad-hoc task files by hand.
 3. If `workflow_next` returns `adaptiveControl.strategy: "subagent_brief"`, prefer the recommended `workflow_delegate` dry-run/execute path for bounded research before asking questions that repository/spec inspection can answer.
 4. If a planning/grill task already exists and appears to match the request, continue it. If it might be unrelated, ask before creating a duplicate.
@@ -86,7 +86,7 @@ Use `roundKind`: `scope`, `runtime`, `validation`, `custom`; reserve `final_conf
 5. Use `decisionSeverity: "blocking"` unless the decision is genuinely optional.
 6. Use `persistTo: "prd"` for task-local behavior, `"spec"` only for durable project knowledge, and `"none"` only for transient preferences.
 7. Only fall back to separate `record_grill_decision`, `update_prd_section`, and `append_prd_decisions` calls when the composite action cannot express the update.
-8. Do not call `workflow_next` after every PRD child update. Re-run `workflow_next({ "includeContext": "task" })` once after the round only when blocker, PRD coverage, or adaptive routing feedback is needed.
+8. Do not call `workflow_next` after every PRD child update. Re-run `workflow_next({ "includeContext": "signal" })` once after the round for routing; request `detail:"normal"` only when the full Decision Card template is needed.
 
 For examples, see [EXAMPLES.md](./EXAMPLES.md).
 
@@ -111,7 +111,7 @@ Final confirmation happens only after the latest PRD has been written and review
 4. If the user confirms, record final confirmation with `/workflow-prd-confirm --task <task-id> --message "<user confirmation>" --execute`.
 5. Run `workflow_run action=finalize_grill mode=dry_run userConfirmed=true decisionSource=ask_user_question`.
 6. If dry-run passes, run the same `finalize_grill` in `execute` mode.
-7. Run `workflow_next({ "includeContext": "lite" })` and report the next workflow step.
+7. Run `workflow_next({ "includeContext": "signal" })` and report the next workflow step.
 
 Do not include `stage1-final-confirm`, `final-confirmation`, or `prd-confirm` in the same `ask_user_question` call as business decisions. Do not append final confirmation decision IDs into the business `## Grill Decision Log`.
 

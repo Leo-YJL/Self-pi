@@ -14,7 +14,7 @@ const PROFILE_VALUES = ["generic", "unity"] as const;
 const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "record_round_and_update_prd", "append_prd_decisions", "update_prd_section", "init_manifests", "upsert_manifest_entry", "remove_manifest_entry", "sync_manifest_from_diff", "list_tasks", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive", "reopen"] as const;
 const ACTION_VALUES = [...SINGLE_ACTION_VALUES, "batch"] as const;
 const FLOW_VALUES = ["simple", "standard", "complex", "goal"] as const;
-const CONTEXT_VALUES = ["none", "lite", "brief", "task", "check", "finish"] as const;
+const CONTEXT_VALUES = ["none", "signal", "lite", "brief", "task", "check", "finish"] as const;
 const DETAIL_VALUES = ["lite", "summary", "normal", "full"] as const;
 const RUN_DETAIL_VALUES = ["lite", "summary", "full"] as const;
 const DELEGATE_WRITE_POLICY_VALUES = ["report_only", "task_files_only", "manifest_only"] as const;
@@ -25,6 +25,7 @@ const GRILL_PERSIST_VALUES = ["prd", "spec", "none"] as const;
 const GRILL_ROUND_KIND_VALUES = ["scope", "runtime", "validation", "final_confirmation", "custom"] as const;
 const PRD_SECTION_VALUES = ["executionContract", "goal", "requirements", "acceptanceCriteria", "validationPlan", "openQuestions", "finalConfirmation", "outOfScope", "definitionOfDone", "grillResult", "architectureImpact"] as const;
 const PRD_UPDATE_MODE_VALUES = ["replace", "append"] as const;
+const TASK_STATUS_FILTER_VALUES = ["planning", "in_progress", "completed", "no_task", "active", "all"] as const;
 const MANIFEST_AGENT_VALUES = ["implement", "check"] as const;
 const MANIFEST_ENTRY_MODE_VALUES = ["append", "replace"] as const;
 
@@ -86,6 +87,10 @@ const WorkflowRunBatchItemSchema = Type.Object({
   implementEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
   checkEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
   overwrite: Type.Optional(Type.Boolean()),
+  status: Type.Optional(StringEnum(TASK_STATUS_FILTER_VALUES)),
+  taskStatus: Type.Optional(StringEnum(TASK_STATUS_FILTER_VALUES)),
+  limit: Type.Optional(Type.Number()),
+  includeArchived: Type.Optional(Type.Boolean()),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -105,9 +110,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "workflow_next",
     label: "Workflow Next",
-    description: "Semantic read-only workflow router. Does not mutate source/tasks/config; may update runtime cache. Defaults to lite context with evidence refs, omitted refs and token budget metadata.",
-    promptSnippet: "Semantic read-only workflow router for next action and lite context.",
-    promptGuidelines: ["Use workflow_next before workflow stage actions; workflow_next does not mutate source/tasks/config and defaults to includeContext=lite."],
+    description: "Semantic read-only workflow router. Does not mutate source/tasks/config; may update runtime cache. Defaults to lite context and supports signal mode for very low-token routing.",
+    promptSnippet: "Semantic read-only workflow router for next action, signal/lite context and evidence refs.",
+    promptGuidelines: ["Use workflow_next before workflow stage actions; prefer includeContext=signal for routing and request lite/task/check/finish only when refs are insufficient."],
     parameters: Type.Object({
       task: Type.Optional(Type.String()),
       agent: Type.Optional(StringEnum(["research", "implement", "check", "finish"] as const)),
@@ -155,7 +160,7 @@ export default function (pi: ExtensionAPI) {
     label: "Workflow Run",
     description: "Controlled workflow stage actuator. Dry-run by default; supports action=batch with actions[] for deterministic transactions.",
     promptSnippet: "Controlled workflow stage actuator for create/start/checkpoint/finish/batch actions.",
-    promptGuidelines: ["Use workflow_run only after workflow_next recommends an action; prefer dry_run before execute for risky operations, and use action=batch to combine deterministic steps."],
+    promptGuidelines: ["Use workflow_run after workflow_next recommends an action; safe execute actions run gates first and return blockers without mutating when they fail, use dry_run for previews or risky operations, and use action=batch to combine deterministic steps."],
     parameters: Type.Object({
       action: StringEnum(ACTION_VALUES),
       task: Type.Optional(Type.String()),
@@ -192,6 +197,10 @@ export default function (pi: ExtensionAPI) {
       implementEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
       checkEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
       overwrite: Type.Optional(Type.Boolean()),
+      status: Type.Optional(StringEnum(TASK_STATUS_FILTER_VALUES)),
+      taskStatus: Type.Optional(StringEnum(TASK_STATUS_FILTER_VALUES)),
+      limit: Type.Optional(Type.Number()),
+      includeArchived: Type.Optional(Type.Boolean()),
       actions: Type.Optional(Type.Array(WorkflowRunBatchItemSchema)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

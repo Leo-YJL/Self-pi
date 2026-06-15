@@ -6,6 +6,7 @@ import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 import { buildContextBundle, type WorkflowContextBundle } from "./contextBundle.ts";
 import { contextBudgetPolicy, estimateTokens, omitted, tokenBudget, truncateText } from "./contextBudget.ts";
 import { computeWorkflowNextCacheKey, readWorkflowNextCache, writeWorkflowNextCache } from "./cache.ts";
+import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
 import { readWorkflowTelemetrySummary, writeWorkflowTelemetry } from "./telemetry.ts";
 import { buildAdaptiveControl, compactAdaptiveControl } from "./adaptive.ts";
 import { isGrillFinalized } from "./grill.ts";
@@ -75,8 +76,9 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
 
   const bundle = includeContext === "none" ? null : await buildContextBundle(root, task, { mode: includeContext, agent: input.agent, profile, detail: input.detail });
   const telemetrySummary = await readWorkflowTelemetrySummary(root, task.id);
-  const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent })) : undefined;
-  const context = bundle ? contextFromBundle(bundle, input.detail, adaptiveControl) : undefined;
+  const includeDecisionCards = input.detail === "normal" || input.detail === "full";
+  const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent }), { signal: includeContext === "signal", includeDecisionCards }) : undefined;
+  const context = bundle ? await contextFromBundle(root, bundle, input.detail, adaptiveControl) : undefined;
   const recommendedTool = adaptiveControl?.strategy === "deterministic_preflight" && adaptiveControl.deterministicActions[0]
     ? adaptiveControl.deterministicActions[0]
     : adaptiveControl?.strategy === "subagent_brief" && adaptiveControl.delegateRecommendedCall ? adaptiveControl.delegateRecommendedCall : next.recommendedTool;
@@ -95,6 +97,11 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     omitted: context?.omitted,
     tokenBudget: context?.tokenBudget,
     adaptiveControl,
+    blockedCodes: bundle?.blockedBy.map((blocker) => blocker.code) ?? [],
+    warningCodes: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings].map((warning) => warning.code),
+    strategy: adaptiveControl?.strategy,
+    recommendedAgent: adaptiveControl?.recommendedAgent,
+    detailRef: context?.detailRef,
     cache: {
       stableKey: "workflow-next:v2",
       cacheFriendly: true,
@@ -130,7 +137,7 @@ function attachTaskCandidates(output: WorkflowNextOutput, tasks: WorkflowTaskJso
 }
 
 function isWorkflowNextCacheable(includeContext: WorkflowNextInput["includeContext"], detail: WorkflowNextInput["detail"]): boolean {
-  if (!includeContext || includeContext === "lite" || includeContext === "brief") return detail !== "full" && detail !== "normal";
+  if (!includeContext || includeContext === "lite" || includeContext === "brief" || includeContext === "signal") return detail !== "full" && detail !== "normal";
   return false;
 }
 
@@ -145,15 +152,34 @@ function emptyContext(mode: WorkflowContextSummary["mode"], summaryText: string,
   };
 }
 
-function contextFromBundle(bundle: WorkflowContextBundle, detail: DetailMode = "summary", adaptiveControl?: WorkflowContextSummary["adaptiveControl"]): WorkflowContextSummary {
+async function contextFromBundle(root: string, bundle: WorkflowContextBundle, detail: DetailMode = "summary", adaptiveControl?: WorkflowContextSummary["adaptiveControl"]): Promise<WorkflowContextSummary> {
   const policy = contextBudgetPolicy(bundle.mode, detail);
   const evidenceRefs = evidenceRefsFor(bundle);
   const omittedItems: WorkflowOmittedArtifact[] = [];
   const truncatedSummary = truncateText(bundle.summary, policy.maxSummaryChars || bundle.summary.length);
   let truncatedBytes = truncatedSummary.truncatedBytes;
   let details: unknown;
+  let detailRef: string | undefined;
 
-  if (policy.includeDetails) {
+  if (bundle.mode === "signal") {
+    const artifact = await writeJsonArtifact(root, "context", {
+      kind: "pi-coding-workflow.context",
+      schemaVersion: 1,
+      mode: bundle.mode,
+      task: bundle.task,
+      prd: bundle.prd,
+      manifests: {
+        implement: compactManifest(bundle.manifests.implement),
+        check: compactManifest(bundle.manifests.check),
+      },
+      workspace: bundle.workspace,
+      blockedBy: bundle.blockedBy,
+      warnings: bundle.warnings,
+      adaptiveControl,
+      createdAt: new Date().toISOString(),
+    });
+    detailRef = artifact.artifactRef;
+  } else if (policy.includeDetails) {
     details = detailedContext(bundle);
     const detailsTokens = estimateTokens(details);
     if (detailsTokens > policy.maxRecommendedTokens) {
@@ -164,16 +190,17 @@ function contextFromBundle(bundle: WorkflowContextBundle, detail: DetailMode = "
     omittedItems.push(omitted("context.details", "workflow_next.details", detailedContext(bundle), `${bundle.mode} mode returns evidence refs instead of full details.`));
   }
 
-  const valueForBudget = { summary: truncatedSummary.text, evidenceRefs, adaptiveControl, details };
+  const summary = bundle.mode === "signal" ? "" : truncatedSummary.text;
+  const valueForBudget = { summary, evidenceRefs, details, detailRef };
   return {
     mode: bundle.mode,
-    summary: truncatedSummary.text,
+    summary,
     prdHash: bundle.prd.source.hash,
     evidenceRefs,
     omitted: omittedItems,
     tokenBudget: tokenBudget(valueForBudget, policy.maxRecommendedTokens, { truncatedBytes, omitted: omittedItems }),
-    adaptiveControl,
     details,
+    detailRef,
   };
 }
 

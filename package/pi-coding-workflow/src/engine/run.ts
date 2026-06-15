@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { FlowLevel, WorkflowManifestAgent, WorkflowManifestEntryInput, WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
-import { createTask, findActiveTask, listRootTasks, readTask, slugify, todayPrefix, tryReadTask, writeTask, type WorkflowTaskJson } from "./task.ts";
+import { createTask, findActiveTask, listArchivedTasks, listRootTasks, readTask, slugify, todayPrefix, tryReadTask, writeTask, type WorkflowTaskJson } from "./task.ts";
 import { checkpoint } from "./checkpoint.ts";
 import { validateTask } from "./validate.ts";
 import { estimateTokens, RUN_RESULT_TARGET_TOKENS } from "./contextBudget.ts";
@@ -124,8 +124,9 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
   }
 
   if (action === "list_tasks") {
-    const tasks = await listRootTasks(root);
-    return { ...ok(action, mode, false, tasks.length > 0 ? `Found ${tasks.length} workflow task(s).` : "No workflow tasks found."), tasks: tasks.map(taskSummary) as any, preflight: { tasks: tasks.map(taskSummary) }, nextAction: tasks.length > 0 ? "select_task" : "no_task_grill" };
+    const listed = await listWorkflowTasks(root, input);
+    const total = listed.total;
+    return { ...ok(action, mode, false, total > 0 ? `Found ${total} matching workflow task(s); returned ${listed.tasks.length}.` : "No workflow tasks found."), tasks: listed.tasks.map(taskSummary) as any, preflight: { tasks: listed.tasks.map(taskSummary), total, limit: listed.limit, status: listed.status, includeArchived: listed.includeArchived }, nextAction: listed.tasks.length > 0 ? "select_task" : "no_task_grill" };
   }
 
   if (action === "record_grill_decision") {
@@ -302,11 +303,20 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     const task = await resolveTask(root, input.task);
     if (!task) return blocked(action, mode, "missing_task", "sync_manifest_from_diff requires task or an active task.");
     const candidates = await gitChangedFiles(root);
-    if (mode !== "execute") return { ...ok(action, mode, false, candidates.length > 0 ? `Dry-run sync_manifest_from_diff; found ${candidates.length} changed file candidate(s).` : "Dry-run sync_manifest_from_diff; no git changed files found."), task: task.id, status: task.status, stage: task.stage, preflight: { candidates }, nextAction: candidates.length > 0 ? "upsert_manifest_entry" : "continue" };
     const manifest = parseManifestAgent(input.manifest);
-    if (!manifest) return blocked(action, mode, "missing_manifest", "sync_manifest_from_diff execute requires manifest=implement or manifest=check plus explicit entries/reasons.");
-    const entries = manifestEntriesFromInput(manifest === "implement" ? input.implementEntries : input.checkEntries);
+    const rawEntries = manifest === "implement" ? input.implementEntries : manifest === "check" ? input.checkEntries : undefined;
+    const entries = manifest ? manifestEntriesFromInput(rawEntries) : { entries: [] as WorkflowManifestEntryInput[] };
     if (entries.error) return blocked(action, mode, entries.error.code, entries.error.message);
+    const requiredForExecute = { manifest: "implement or check", entries: "explicit entries with file and reason" };
+    if (mode !== "execute") {
+      const missingForExecute = [
+        manifest ? undefined : "manifest",
+        entries.entries.length > 0 ? undefined : "entries",
+      ].filter(Boolean);
+      const hint = missingForExecute.length > 0 ? ` Execute requires ${missingForExecute.join(" and ")}.` : " Execute input is complete.";
+      return { ...ok(action, mode, false, candidates.length > 0 ? `Dry-run sync_manifest_from_diff; found ${candidates.length} changed file candidate(s).${hint}` : `Dry-run sync_manifest_from_diff; no git changed files found.${hint}`), task: task.id, status: task.status, stage: task.stage, preflight: { candidates, requiredForExecute, missingForExecute }, nextAction: missingForExecute.length > 0 ? "upsert_manifest_entry" : "execute_sync_manifest_from_diff" };
+    }
+    if (!manifest) return blocked(action, mode, "missing_manifest", "sync_manifest_from_diff execute requires manifest=implement or manifest=check plus explicit entries/reasons.");
     if (entries.entries.length === 0) return blocked(action, mode, "missing_manifest_entries", "sync_manifest_from_diff execute requires explicit entries with file and reason; dry_run lists candidates only.");
     const changed: string[] = [];
     for (const entry of entries.entries) {
@@ -530,6 +540,24 @@ function plannedAction(item: WorkflowRunBatchItem, input: WorkflowRunInput, mode
     title: item.title,
     summary: item.action === "create_from_grill" || item.action === "create_child" ? `Plan ${item.action}: ${item.title ?? "untitled"}` : item.action === "record_grill_decision" ? `Plan record_grill_decision: ${item.decisionId ?? "unnamed"}` : item.action === "record_round_and_update_prd" ? `Plan record_round_and_update_prd: ${item.decisions?.length ?? 0} decision(s), ${item.prdUpdates?.length ?? 0} PRD update(s)` : `Plan ${item.action}`,
   };
+}
+
+async function listWorkflowTasks(root: string, input: WorkflowRunInput): Promise<{ tasks: WorkflowTaskJson[]; total: number; limit: number; status: string; includeArchived: boolean }> {
+  const status = input.taskStatus ?? input.status ?? "active";
+  const includeArchived = input.includeArchived === true;
+  const limit = Math.max(1, Math.min(50, Math.floor(Number(input.limit ?? 12)) || 12));
+  const rootTasks = await listRootTasks(root);
+  const archived = includeArchived ? await listArchivedTasks(root) : [];
+  const all = [...rootTasks, ...archived];
+  const filtered = all.filter((task) => {
+    if (status === "all") return true;
+    if (status === "active") return task.status === "planning" || task.status === "in_progress";
+    return task.status === status;
+  });
+  const active = filtered.filter((task) => task.status === "planning" || task.status === "in_progress");
+  const completed = filtered.filter((task) => task.status === "completed");
+  const ordered = status === "active" ? active : [...active, ...completed];
+  return { tasks: ordered.slice(0, limit), total: filtered.length, limit, status, includeArchived };
 }
 
 async function flowLevelForCreate(root: string, explicit?: FlowLevel): Promise<FlowLevel> {

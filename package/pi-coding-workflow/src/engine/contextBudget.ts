@@ -2,6 +2,7 @@ import type { ContextMode, DetailMode, WorkflowOmittedArtifact, WorkflowTokenBud
 
 export const TOKEN_CHARS = 4;
 
+export const NEXT_SIGNAL_TARGET_TOKENS = 500;
 export const NEXT_LITE_TARGET_TOKENS = 800;
 export const NEXT_SUMMARY_TARGET_TOKENS = 2_000;
 export const NEXT_DETAIL_TARGET_TOKENS = 3_500;
@@ -26,6 +27,7 @@ export function estimateBytes(value: unknown): number {
 
 export function contextBudgetPolicy(mode: ContextMode, detail: DetailMode = "summary"): ContextBudgetPolicy {
   if (mode === "none") return { targetTokens: 0, maxRecommendedTokens: 0, maxSummaryChars: 0, includeDetails: false };
+  if (mode === "signal") return { targetTokens: NEXT_SIGNAL_TARGET_TOKENS, maxRecommendedTokens: NEXT_SIGNAL_TARGET_TOKENS, maxSummaryChars: 0, includeDetails: false };
   if (mode === "lite" || detail === "lite") {
     return { targetTokens: NEXT_LITE_TARGET_TOKENS, maxRecommendedTokens: NEXT_LITE_TARGET_TOKENS, maxSummaryChars: 1_600, includeDetails: false };
   }

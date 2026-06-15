@@ -65,7 +65,13 @@ npm install @leo-yjl/pi-coding-workflow
 { "includeContext": "lite" }
 ```
 
-需要更多详情时再显式请求：
+需要极低 token 的路由信号时可请求：
+
+```json
+{ "includeContext": "signal" }
+```
+
+`signal` 模式只返回状态、blocker/warning codes、推荐工具和 `detailRef`；完整上下文写入 `.workflow/.runtime/context/*.json`。需要更多详情时再显式请求：
 
 ```json
 { "includeContext": "task" }
@@ -80,7 +86,7 @@ npm install @leo-yjl/pi-coding-workflow
 
 - 默认 `mode: "dry_run"`，只规划不启动 subagent。
 - `execute` 使用独立短上下文，不继承主会话长历史。
-- 有 `maxTurns`、`maxToolCalls`、`maxInputTokens`、`maxOutputTokens` 预算。
+- 有 `maxTurns`、`maxToolCalls`、`maxInputTokens`、`maxOutputTokens` 预算；这些是 soft limits，超过后会 abort，可能已多启动 1 个 turn/tool event。
 - 有 `writePolicy`: `report_only`、`task_files_only`、`manifest_only`。
 - subagent 内部的 `workflow_run` 只能 dry-run；最终状态推进仍由主流程调用 `workflow_run`。
 - 返回 `artifactRef`、`metrics`、`changedFiles`、`blockedBy`、`recommendedNext`。
@@ -133,10 +139,10 @@ batch
 - Stage 1 grill 现在区分 `decisionCount` 与 `askRounds`：同一轮用户问答产生的多个 decision 应共享 `roundId`，`batch` 中未显式传 `roundId` 的 `record_grill_decision` 会被视为同一轮。
 - `append_prd_decisions` 会把已记录但尚未写入 PRD 的业务 decision 追加到 `## Grill Decision Log`，用于确定性固化 “grill → 写 PRD” 步骤。
 - `update_prd_section` 可确定性 replace/append 指定 PRD section（如 Requirements、Acceptance Criteria、Validation Plan、Open Questions），减少手工 edit 风险。
-- `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` 负责确定性维护 `implement.jsonl` 和 `check.jsonl`；不要优先让 LLM 裸写 JSONL。
-- `list_tasks` 可列出任务；`archive` 会在用户确认后移动已完成任务；`reopen` 可在用户确认并提供原因后把已完成任务回退到执行阶段。
+- `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` 负责确定性维护 `implement.jsonl` 和 `check.jsonl`；不要优先让 LLM 裸写 JSONL。`sync_manifest_from_diff` dry-run 会列出候选并提示 execute 所需的 `manifest` 与 entries。
+- `list_tasks` 可列出任务，支持 `status`/`taskStatus`、`limit`、`includeArchived`；默认只返回 active 任务且最多 12 个，避免 token 膨胀。`archive` 会在用户确认后移动已完成任务；`reopen` 可在用户确认并提供原因后把已完成任务回退到执行阶段。
 - `standard` 任务至少需要 2 个业务 grill round，`complex` / `goal` 至少需要 3 个；每个业务轮次后要先更新 PRD，业务决策必须写入 PRD 的 `Grill Decision Log`，最终确认必须单独发生在最新 PRD 上。
-- `start_checked` 和 `finish_run` 会执行确定性 preflight。
+- `start_checked` 和 `finish_run` 会执行确定性 preflight；对低风险 gate action，`execute` 会先校验，失败时返回 blocker 且不会推进状态，dry-run 主要用于预览和解释。
 - 当前版本不会执行 git commit 或 push；`.workflow/config.json` 中的 git 字段是保留策略配置，不能当作自动提交开关。
 - `batch` 可顺序执行多个动作，并返回 transaction、artifact 和 rollback hints；默认结果会压缩，完整 child results 写入 `.workflow/.runtime/transactions/*.json`，需要内联完整结果时传 `detail: "full"`。
 
@@ -174,12 +180,13 @@ batch
 
 ### 上下文预算与缓存
 
-`workflow_next` 默认返回 lite context，并通过以下字段降低重复上下文成本：
+`workflow_next` 默认返回 lite context；也支持更低 token 的 `includeContext:"signal"`。它通过以下字段降低重复上下文成本：
 
 - `evidenceRefs`
 - `omitted`
 - `tokenBudget`
 - `meta`
+- `detailRef`（signal 模式下的完整上下文 artifact）
 - fingerprint-backed workflow cache
 - telemetry warnings for repeated `workflow_next` / `workflow_run` / `workflow_delegate` calls and high estimated token usage
 
@@ -342,7 +349,13 @@ Default request:
 { "includeContext": "lite" }
 ```
 
-Request more detail only when needed:
+For very low-token routing signals, request:
+
+```json
+{ "includeContext": "signal" }
+```
+
+`signal` returns status, blocker/warning codes, recommended tool and `detailRef`; full context is written to `.workflow/.runtime/context/*.json`. Request more details only when needed:
 
 ```json
 { "includeContext": "task" }
@@ -357,7 +370,7 @@ Key constraints:
 
 - Defaults to `mode: "dry_run"`; dry-run plans the delegate without starting a subagent.
 - `execute` uses a fresh short context instead of inheriting the parent session history.
-- Budgets: `maxTurns`, `maxToolCalls`, `maxInputTokens`, `maxOutputTokens`.
+- Budgets: `maxTurns`, `maxToolCalls`, `maxInputTokens`, `maxOutputTokens`; these are soft limits, so abort happens after the limit is observed and may allow one extra turn/tool event to start.
 - Write policies: `report_only`, `task_files_only`, `manifest_only`.
 - Subagent `workflow_run` calls are dry-run only; parent workflow still owns deterministic state transitions.
 - Returns `artifactRef`, `metrics`, `changedFiles`, `blockedBy`, and `recommendedNext`.
@@ -410,10 +423,10 @@ Rules:
 - Stage 1 grill now separates `decisionCount` from `askRounds`: multiple decisions from the same user interaction should share `roundId`; `record_grill_decision` items inside one `batch` share a round by default when no explicit `roundId` is provided.
 - `append_prd_decisions` appends recorded business decisions that are still missing from the PRD into `## Grill Decision Log`, making the “grill → write PRD” step deterministic.
 - `update_prd_section` deterministically replaces/appends a target PRD section such as Requirements, Acceptance Criteria, Validation Plan or Open Questions, reducing manual edit risk.
-- `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` deterministically maintain `implement.jsonl` and `check.jsonl`; prefer them over hand-written JSONL.
-- `list_tasks` lists workflow tasks; `archive` moves a completed task after user confirmation; `reopen` moves a completed task back to execution after confirmation and a reason.
+- `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` deterministically maintain `implement.jsonl` and `check.jsonl`; prefer them over hand-written JSONL. `sync_manifest_from_diff` dry-run lists candidates and reports the `manifest`/entries required for execute.
+- `list_tasks` lists workflow tasks and supports `status`/`taskStatus`, `limit`, and `includeArchived`; by default it returns active tasks only and at most 12 items to avoid token growth. `archive` moves a completed task after user confirmation; `reopen` moves a completed task back to execution after confirmation and a reason.
 - `standard` tasks require at least 2 business grill rounds, while `complex` / `goal` require at least 3; the PRD must be updated after each business round, business decisions must appear in the PRD `Grill Decision Log`, and final confirmation must be separate and tied to the latest PRD.
-- `start_checked` and `finish_run` run deterministic preflight checks first.
+- `start_checked` and `finish_run` run deterministic preflight checks first; for low-risk gate actions, `execute` validates first and returns blockers without mutating when gates fail, while dry-run remains useful for preview/explanation.
 - This version does not run git commit or push; git fields in `.workflow/config.json` are reserved policy settings, not automatic commit switches.
 - `batch` runs multiple actions in order and returns transaction artifacts plus rollback hints; by default child results are compacted and full results are written to `.workflow/.runtime/transactions/*.json`; pass `detail: "full"` when inline full results are needed.
 
@@ -451,12 +464,13 @@ The engine supports:
 
 ### Context budget and cache
 
-`workflow_next` returns lite context by default and reduces repeated context cost through:
+`workflow_next` returns lite context by default and also supports low-token `includeContext:"signal"`; it reduces repeated context cost through:
 
 - `evidenceRefs`
 - `omitted`
 - `tokenBudget`
 - `meta`
+- `detailRef` for full context artifacts in signal mode
 - fingerprint-backed workflow cache
 - telemetry warnings for repeated `workflow_next` / `workflow_run` / `workflow_delegate` calls and high estimated token usage
 

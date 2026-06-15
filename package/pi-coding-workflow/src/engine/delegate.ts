@@ -10,6 +10,7 @@ import { workflowRun } from "./run.ts";
 import { manifestFiles, readTaskManifests } from "./manifest.ts";
 import { estimateTokens, RUN_RESULT_TARGET_TOKENS, truncateText } from "./contextBudget.ts";
 import { writeWorkflowTelemetry } from "./telemetry.ts";
+import { loadDelegateSdk, type DelegateSession } from "./delegateSdk.ts";
 
 const execFileAsync = promisify(execFile);
 const DELEGATE_RESULT_TARGET_TOKENS = 1_200;
@@ -22,27 +23,6 @@ interface DelegateDefaults {
   maxInputTokens: number;
   maxOutputTokens: number;
   writePolicy: DelegateWritePolicy;
-}
-
-interface DelegateSessionEvent {
-  type: string;
-}
-
-interface DelegateSession {
-  subscribe(listener: (event: DelegateSessionEvent) => void): () => void;
-  prompt(prompt: string): Promise<void>;
-  abort(): Promise<void> | void;
-  dispose(): void;
-  messages?: unknown[];
-  state?: { messages?: unknown[] };
-  agent?: { state?: { messages?: unknown[] } };
-}
-
-interface DelegateSdkSurface {
-  DefaultResourceLoader: new (options: Record<string, unknown>) => { reload(): Promise<void> };
-  createAgentSession(options: Record<string, unknown>): Promise<{ session: DelegateSession }>;
-  SessionManager: { inMemory(root: string): unknown };
-  defineTool: unknown;
 }
 
 const DEFAULTS: Record<WorkflowAgent, DelegateDefaults> = {
@@ -138,11 +118,10 @@ export async function workflowDelegate(root: string, input: WorkflowDelegateInpu
   let finalText = "";
   const transcript: unknown[] = [];
 
-  let sdk: DelegateSdkSurface;
+  let sdk: Awaited<ReturnType<typeof loadDelegateSdk>>["sdk"];
   let Type: any;
   try {
-    sdk = await import("@earendil-works/pi-coding-agent") as unknown as DelegateSdkSurface;
-    Type = (await import("typebox")).Type;
+    ({ sdk, Type } = await loadDelegateSdk());
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return withDelegateTelemetry(root, decorateDelegateOutput({

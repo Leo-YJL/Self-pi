@@ -49,7 +49,7 @@ export async function buildContextBundle(
 
 function prdModeForContext(mode: ContextMode, detail?: DetailMode): PrdViewMode {
   if (detail === "full" || detail === "normal") return "full";
-  if (mode === "lite" || mode === "brief" || detail === "lite" || detail === "summary") return "compact";
+  if (mode === "signal" || mode === "lite" || mode === "brief" || detail === "lite" || detail === "summary") return "compact";
   return "brief";
 }
 
