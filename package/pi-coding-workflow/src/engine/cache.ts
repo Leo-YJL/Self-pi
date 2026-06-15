@@ -5,12 +5,12 @@ import { dirname } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { DetailMode, WorkflowAgent, WorkflowNextOutput } from "../types.ts";
+import { PACKAGE_VERSION } from "../version.ts";
 import type { WorkflowTaskJson } from "./task.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 
 const execFileAsync = promisify(execFile);
 const CACHE_SCHEMA_VERSION = 2;
-const PACKAGE_VERSION = "0.1.0";
 const MAX_CACHE_ENTRIES = 25;
 
 interface CacheFile {

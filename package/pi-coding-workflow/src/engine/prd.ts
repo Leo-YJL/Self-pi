@@ -4,6 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import type { WorkflowBlocker, WorkflowGrillDecision, WorkflowStage } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 import type { WorkflowTaskJson } from "./task.ts";
+import { isFinalConfirmationDecisionId } from "./identifiers.ts";
 
 export type PrdViewMode = "compact" | "brief" | "full";
 export type PrdSectionKey =
@@ -511,10 +512,6 @@ function analyzeOpenQuestions(section: PrdSection): PrdKernel["openQuestions"] {
   };
 }
 
-function isFinalConfirmationDecisionId(id: string): boolean {
-  return /(?:stage1[-_.])?final[-_.]?confirm|final[-_.]?confirmation|prd[-_.]?confirm/i.test(id);
-}
-
 function escapeTableCell(value: string): string {
   return value.replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
 }
@@ -551,6 +548,10 @@ function analyzeFinalConfirmation(
     const text = stripMarkdown(candidate.text);
     if (!text) continue;
     const confirmedPrdHash = extractConfirmedPrdHash(candidate.text);
+    const explicitStatus = extractConfirmationStatus(candidate.text);
+    if (explicitStatus) {
+      return { confirmed: explicitStatus === "confirmed", evidence: `${candidate.label}: ${text.slice(0, 240)}`, found: true, confirmedPrdHash };
+    }
     if (isConfirmedText(text)) return { confirmed: true, evidence: `${candidate.label}: ${text.slice(0, 240)}`, found: true, confirmedPrdHash };
     return { confirmed: false, evidence: `${candidate.label}: ${text.slice(0, 240)}`, found: true, confirmedPrdHash };
   }
@@ -561,10 +562,24 @@ function extractConfirmedPrdHash(text: string): string | undefined {
   return /Confirmed\s+PRD\s+Hash\s*[:：]\s*([a-f0-9]{12,64})/i.exec(text)?.[1];
 }
 
+function extractConfirmationStatus(text: string): "confirmed" | "pending" | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(?:[-*]\s*)?(?:\[[ xX]\]\s*)?status\s*[:：]\s*(.+?)\s*$/i.exec(stripMarkdown(line));
+    if (!match) continue;
+    const value = match[1].trim().toLowerCase();
+    if (/^(confirmed|approved|accepted|proceed|ready|yes|true|done|已确认|确认|通过|可以开始|继续实施)$/.test(value)) return "confirmed";
+    if (/^(pending|unconfirmed|not confirmed|rejected|blocked|todo|tbd|no|false|待确认|未确认|尚未确认|还没确认|待定|拒绝|阻塞)$/.test(value)) return "pending";
+    if (/\b(unconfirmed|not confirmed|pending|rejected|blocked|todo|tbd)\b/.test(value) || /未|尚未|还没|没有|待确认|待定|不可|不能|拒绝|阻塞/.test(value)) return "pending";
+    if (/\b(confirmed|approved|proceed|accepted)\b/.test(value) || /已确认|可以开始|继续实施/.test(value)) return "confirmed";
+  }
+  return undefined;
+}
+
 function isConfirmedText(text: string): boolean {
   const lower = text.toLowerCase();
-  if (/\b(unconfirmed|not confirmed|pending|todo|tbd)\b/.test(lower) || /未确认|待确认|待定/.test(text)) return false;
-  return /\bconfirmed\b|\bproceed\b|\bapproved\b|已确认|确认|用户选择|继续实施|可以开始/.test(lower) || /已确认|确认|用户选择|继续实施|可以开始/.test(text);
+  if (/\b(unconfirmed|not confirmed|not approved|do not proceed|pending|rejected|blocked|todo|tbd|no)\b/.test(lower)) return false;
+  if (/未|尚未|还没|没有确认|待确认|待定|不可|不能|拒绝|阻塞/.test(text)) return false;
+  return /\bconfirmed\b|\bproceed\b|\bapproved\b|\baccepted\b/.test(lower) || /已确认|用户选择|继续实施|可以开始|批准/.test(text);
 }
 
 function stripMarkdown(line: string): string {

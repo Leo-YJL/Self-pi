@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
+import { PACKAGE_VERSION } from "../version.ts";
 const execFileAsync = promisify(execFile);
 
 export async function checkpoint(root: string, phase = "custom", notes?: string): Promise<{ passed: boolean; summary: string; artifactRef: string; details: unknown }> {
@@ -18,7 +19,7 @@ export async function checkpoint(root: string, phase = "custom", notes?: string)
   const artifact = await writeJsonArtifact(root, "checkpoints", {
     schemaVersion: 1,
     kind: "pi-coding-workflow.checkpoint",
-    package: { name: "pi-coding-workflow", version: "0.1.0" },
+    package: { name: "pi-coding-workflow", version: PACKAGE_VERSION },
     phase,
     notes,
     passed,

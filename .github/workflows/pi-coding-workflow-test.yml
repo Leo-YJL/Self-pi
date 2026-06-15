@@ -1,0 +1,28 @@
+name: pi-coding-workflow test
+
+on:
+  push:
+    paths:
+      - 'package/pi-coding-workflow/**'
+      - '.github/workflows/pi-coding-workflow-test.yml'
+      - 'package.json'
+  pull_request:
+    paths:
+      - 'package/pi-coding-workflow/**'
+      - '.github/workflows/pi-coding-workflow-test.yml'
+      - 'package.json'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: package/pi-coding-workflow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --legacy-peer-deps
+      - run: npm test
+      - run: npm run smoke:unity-scanner

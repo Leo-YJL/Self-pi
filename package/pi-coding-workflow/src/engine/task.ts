@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { FlowLevel, WorkflowGrillState, WorkflowStatus } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
+import { initTaskManifests } from "./manifest.ts";
 
 export interface WorkflowTaskJson {
   id: string;
@@ -40,7 +41,8 @@ export function taskDirectory(root: string, id: string): string {
 }
 
 export function normalizeTask(raw: Partial<WorkflowTaskJson> & Record<string, unknown>): WorkflowTaskJson {
-  const id = String(raw.id ?? "");
+  const id = String(raw.id ?? "").trim();
+  if (!id) throw new Error("task.id is required.");
   const now = new Date().toISOString();
   const status = (raw.status === "planning" || raw.status === "in_progress" || raw.status === "completed" || raw.status === "no_task") ? raw.status : "planning";
   const flowLevel = (raw.flowLevel ?? raw.flow_level ?? "standard") as FlowLevel;
@@ -79,6 +81,7 @@ export async function createTask(root: string, title: string, level: FlowLevel, 
   };
   await writeTask(root, task);
   await writeFile(join(dir, "prd.md"), `# ${title}\n\n## Execution Contract\n\n- Flow Level: ${level}\n- Outcome: TODO\n\n## Open Questions\n\nNone.\n`, "utf8");
+  await initTaskManifests(root, task);
   return task;
 }
 

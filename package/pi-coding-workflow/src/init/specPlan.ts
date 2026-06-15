@@ -7,6 +7,7 @@ import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 import { renderTemplate } from "../templates/renderTemplate.ts";
 import { scanUnityProject } from "./unityScanner.ts";
 import { GENERIC_TEMPLATES, UNITY_TEMPLATES } from "./templateCatalog.ts";
+import { PACKAGE_VERSION } from "../version.ts";
 
 function sha256(text: string): string {
   return `sha256:${createHash("sha256").update(text).digest("hex")}`;
@@ -73,7 +74,7 @@ export async function createInitSpecPlan(root: string, profile: ProfileName): Pr
     kind: "workflow-init-spec-plan",
     planId: makePlanId(),
     createdAt: new Date().toISOString(),
-    package: { name: "pi-coding-workflow", version: "0.1.0" },
+    package: { name: "pi-coding-workflow", version: PACKAGE_VERSION },
     project: { root, name: "Project", detectedProfiles: profile === "unity" && (scan?.confidence ?? 0) >= 0.75 ? ["unity"] : [profile], selectedProfile: profile, confidence: scan?.confidence ?? 1 },
     scan: { signals: scan?.signals ?? [], summary: scan ? `Unity confidence ${scan.confidence.toFixed(2)}` : "Generic profile selected." },
     facts,

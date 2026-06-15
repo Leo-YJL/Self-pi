@@ -1,3 +1,5 @@
+const VALUE_KEYS = new Set(["profile", "plan", "task", "message", "answer"]);
+
 export function parseArgs(args: string): Record<string, string | boolean> {
   const tokens = args.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
   const result: Record<string, string | boolean> = {};
@@ -6,7 +8,7 @@ export function parseArgs(args: string): Record<string, string | boolean> {
     if (!token.startsWith("--")) continue;
     const key = token.slice(2);
     const next = tokens[i + 1];
-    if (!next || next.startsWith("--")) result[key] = true;
+    if (!next || next.startsWith("--")) result[key] = VALUE_KEYS.has(key) ? "" : true;
     else {
       result[key] = next;
       i++;

@@ -109,11 +109,17 @@ record_grill_decision
 record_round_and_update_prd
 append_prd_decisions
 update_prd_section
+init_manifests
+upsert_manifest_entry
+remove_manifest_entry
+sync_manifest_from_diff
+list_tasks
 finalize_grill
 start_checked
 checkpoint
 finish_run
 archive
+reopen
 batch
 ```
 
@@ -127,8 +133,11 @@ batch
 - Stage 1 grill 现在区分 `decisionCount` 与 `askRounds`：同一轮用户问答产生的多个 decision 应共享 `roundId`，`batch` 中未显式传 `roundId` 的 `record_grill_decision` 会被视为同一轮。
 - `append_prd_decisions` 会把已记录但尚未写入 PRD 的业务 decision 追加到 `## Grill Decision Log`，用于确定性固化 “grill → 写 PRD” 步骤。
 - `update_prd_section` 可确定性 replace/append 指定 PRD section（如 Requirements、Acceptance Criteria、Validation Plan、Open Questions），减少手工 edit 风险。
+- `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` 负责确定性维护 `implement.jsonl` 和 `check.jsonl`；不要优先让 LLM 裸写 JSONL。
+- `list_tasks` 可列出任务；`archive` 会在用户确认后移动已完成任务；`reopen` 可在用户确认并提供原因后把已完成任务回退到执行阶段。
 - `standard` 任务至少需要 2 个业务 grill round，`complex` / `goal` 至少需要 3 个；每个业务轮次后要先更新 PRD，业务决策必须写入 PRD 的 `Grill Decision Log`，最终确认必须单独发生在最新 PRD 上。
 - `start_checked` 和 `finish_run` 会执行确定性 preflight。
+- 当前版本不会执行 git commit 或 push；`.workflow/config.json` 中的 git 字段是保留策略配置，不能当作自动提交开关。
 - `batch` 可顺序执行多个动作，并返回 transaction、artifact 和 rollback hints；默认结果会压缩，完整 child results 写入 `.workflow/.runtime/transactions/*.json`，需要内联完整结果时传 `detail: "full"`。
 
 ## Pi 命令
@@ -158,9 +167,9 @@ batch
 - 提取 PRD kernel。
 - 检测 TODO / TBD。
 - 检测阻塞性开放问题。
-- 检测最终确认 gate，并通过 `Confirmed PRD Hash` 防止确认后修改 PRD。
+- 检测最终确认 gate，优先识别结构化 `Status: confirmed|pending` 字段，并通过 `Confirmed PRD Hash` 防止确认后修改 PRD。
 - 检查 Acceptance Criteria、Validation Plan、Definition of Done。
-- 校验 `implement.jsonl` / `check.jsonl`。
+- 校验并通过确定性 action 维护 `implement.jsonl` / `check.jsonl`。
 - 执行 checkpoint，例如 `git diff --check`。
 
 ### 上下文预算与缓存
@@ -377,11 +386,17 @@ record_grill_decision
 record_round_and_update_prd
 append_prd_decisions
 update_prd_section
+init_manifests
+upsert_manifest_entry
+remove_manifest_entry
+sync_manifest_from_diff
+list_tasks
 finalize_grill
 start_checked
 checkpoint
 finish_run
 archive
+reopen
 batch
 ```
 
@@ -395,8 +410,11 @@ Rules:
 - Stage 1 grill now separates `decisionCount` from `askRounds`: multiple decisions from the same user interaction should share `roundId`; `record_grill_decision` items inside one `batch` share a round by default when no explicit `roundId` is provided.
 - `append_prd_decisions` appends recorded business decisions that are still missing from the PRD into `## Grill Decision Log`, making the “grill → write PRD” step deterministic.
 - `update_prd_section` deterministically replaces/appends a target PRD section such as Requirements, Acceptance Criteria, Validation Plan or Open Questions, reducing manual edit risk.
+- `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` deterministically maintain `implement.jsonl` and `check.jsonl`; prefer them over hand-written JSONL.
+- `list_tasks` lists workflow tasks; `archive` moves a completed task after user confirmation; `reopen` moves a completed task back to execution after confirmation and a reason.
 - `standard` tasks require at least 2 business grill rounds, while `complex` / `goal` require at least 3; the PRD must be updated after each business round, business decisions must appear in the PRD `Grill Decision Log`, and final confirmation must be separate and tied to the latest PRD.
 - `start_checked` and `finish_run` run deterministic preflight checks first.
+- This version does not run git commit or push; git fields in `.workflow/config.json` are reserved policy settings, not automatic commit switches.
 - `batch` runs multiple actions in order and returns transaction artifacts plus rollback hints; by default child results are compacted and full results are written to `.workflow/.runtime/transactions/*.json`; pass `detail: "full"` when inline full results are needed.
 
 ## Pi commands
@@ -426,9 +444,9 @@ The engine supports:
 - extracting the PRD kernel
 - detecting TODO / TBD markers
 - detecting blocking open questions
-- detecting the final confirmation gate and using `Confirmed PRD Hash` to invalidate stale confirmations after PRD edits
+- detecting the final confirmation gate, preferring structured `Status: confirmed|pending` fields, and using `Confirmed PRD Hash` to invalidate stale confirmations after PRD edits
 - checking Acceptance Criteria, Validation Plan and Definition of Done
-- validating `implement.jsonl` and `check.jsonl`
+- validating and deterministically maintaining `implement.jsonl` and `check.jsonl`
 - running checkpoints such as `git diff --check`
 
 ### Context budget and cache

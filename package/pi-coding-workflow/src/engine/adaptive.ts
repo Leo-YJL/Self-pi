@@ -203,6 +203,12 @@ function chooseAgent(input: AdaptiveInput, codes: string[], blockers: WorkflowBl
 function deterministicActionsFor(input: AdaptiveInput): WorkflowRecommendedCall[] {
   const actions: WorkflowRecommendedCall[] = [];
   const task = input.bundle.task.id;
+  const blockerCodes = input.bundle.blockedBy.map((blocker) => blocker.code);
+  const manifestBlocker = blockerCodes.find((code) => code.includes("manifest"));
+  if (input.bundle.task.status === "planning" && manifestBlocker) {
+    const action = manifestBlocker.endsWith("manifest_missing") || manifestBlocker.endsWith("manifest_empty") ? "init_manifests" : "sync_manifest_from_diff";
+    actions.push({ name: "workflow_run", arguments: { action, mode: "dry_run", task } });
+  }
   if (input.bundle.task.status === "planning" && input.bundle.blockedBy.length === 0) {
     actions.push({ name: "workflow_run", arguments: { action: "start_checked", mode: "dry_run", task } });
   }
@@ -289,7 +295,7 @@ function briefFor(agent: Exclude<WorkflowAdaptiveControl["recommendedAgent"], "n
       ...baseConstraints,
       "Read only the files named by implement/check manifests unless evidence is insufficient.",
       "Make the smallest source changes needed for the current PRD slice.",
-      "Update implement/check manifests if planned files change.",
+      "Update implement/check manifests with workflow_run init_manifests/upsert_manifest_entry/remove_manifest_entry if planned files change; do not hand-write JSONL unless the deterministic action is unavailable.",
       "After implementation, run workflow_run checkpoint with phase=after-implementation.",
     ],
     stopConditions: ["Manifest-backed source changes are complete.", "No unrelated files were modified.", "A checkpoint dry-run has been recommended or executed."],

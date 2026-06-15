@@ -3,15 +3,16 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ProfileName, ProjectWorkflowConfig } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
+import { PACKAGE_VERSION } from "../version.ts";
 
 export function defaultConfig(projectName = "Project", profile: ProfileName = "generic"): ProjectWorkflowConfig {
   return {
     schemaVersion: 1,
-    package: { name: "pi-coding-workflow", requiredVersion: "0.1.0" },
+    package: { name: "pi-coding-workflow", requiredVersion: PACKAGE_VERSION },
     project: { name: projectName, profile, root: "." },
     workflow: { defaultFlowLevel: "standard", taskDir: ".workflow/tasks", specDir: ".workflow/spec", runtimeDir: ".workflow/.runtime" },
     context: { defaultMode: "lite", maxSummaryChars: 2000, artifactMode: "summary-first" },
-    git: { autoCommit: true, autoPush: true, pushConfirmation: "risky", protectedBranches: ["main", "master"], allowBroadStage: false },
+    git: { autoCommit: false, autoPush: false, pushConfirmation: "always", protectedBranches: ["main", "master"], allowBroadStage: false },
     profiles: { enabled: [profile] },
   };
 }

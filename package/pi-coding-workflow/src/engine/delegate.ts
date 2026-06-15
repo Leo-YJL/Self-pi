@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import type { ContextMode, DelegateWritePolicy, DetailMode, WorkflowAgent, WorkflowBlocker, WorkflowDelegateInput, WorkflowDelegateOutput, WorkflowRecommendedCall, WorkflowWarning } from "../types.ts";
 import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
 import { normalizeSlash } from "../safety/pathPolicy.ts";
-import { findActiveTask, readTask, type WorkflowTaskJson } from "./task.ts";
+import { findActiveTask, tryReadTask, type WorkflowTaskJson } from "./task.ts";
 import { workflowNext } from "./route.ts";
 import { workflowRun } from "./run.ts";
 import { manifestFiles, readTaskManifests } from "./manifest.ts";
@@ -22,6 +22,27 @@ interface DelegateDefaults {
   maxInputTokens: number;
   maxOutputTokens: number;
   writePolicy: DelegateWritePolicy;
+}
+
+interface DelegateSessionEvent {
+  type: string;
+}
+
+interface DelegateSession {
+  subscribe(listener: (event: DelegateSessionEvent) => void): () => void;
+  prompt(prompt: string): Promise<void>;
+  abort(): Promise<void> | void;
+  dispose(): void;
+  messages?: unknown[];
+  state?: { messages?: unknown[] };
+  agent?: { state?: { messages?: unknown[] } };
+}
+
+interface DelegateSdkSurface {
+  DefaultResourceLoader: new (options: Record<string, unknown>) => { reload(): Promise<void> };
+  createAgentSession(options: Record<string, unknown>): Promise<{ session: DelegateSession }>;
+  SessionManager: { inMemory(root: string): unknown };
+  defineTool: unknown;
 }
 
 const DEFAULTS: Record<WorkflowAgent, DelegateDefaults> = {
@@ -117,10 +138,10 @@ export async function workflowDelegate(root: string, input: WorkflowDelegateInpu
   let finalText = "";
   const transcript: unknown[] = [];
 
-  let sdk: any;
+  let sdk: DelegateSdkSurface;
   let Type: any;
   try {
-    sdk = await import("@earendil-works/pi-coding-agent");
+    sdk = await import("@earendil-works/pi-coding-agent") as unknown as DelegateSdkSurface;
     Type = (await import("typebox")).Type;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -163,7 +184,7 @@ export async function workflowDelegate(root: string, input: WorkflowDelegateInpu
     tools: allowedToolNames(agent, writePolicy),
   });
 
-  const unsubscribe = session.subscribe((event: any) => {
+  const unsubscribe = session.subscribe((event) => {
     if (event.type === "turn_start") metrics.turns += 1;
     if (event.type === "tool_execution_start") metrics.toolCalls += 1;
     if ((input.stopOnToolBudget ?? true) && metrics.toolCalls > maxToolCalls) {
@@ -256,7 +277,7 @@ export async function workflowDelegate(root: string, input: WorkflowDelegateInpu
 }
 
 async function resolveTask(root: string, id?: string): Promise<WorkflowTaskJson | null> {
-  if (id) return readTask(root, id);
+  if (id) return tryReadTask(root, id);
   return findActiveTask(root);
 }
 
@@ -406,7 +427,7 @@ function recommendedNextFor(agent: WorkflowAgent, task: string): WorkflowRecomme
   return { name: "workflow_run", arguments: { action: "finish_run", mode: "dry_run", task } };
 }
 
-function sessionMessages(session: any): any[] {
+function sessionMessages(session: DelegateSession): unknown[] {
   return session.messages ?? session.state?.messages ?? session.agent?.state?.messages ?? [];
 }
 

@@ -25,7 +25,8 @@ By the end of Stage 1 grill:
    - no `TODO` / `TBD` / `待定` markers,
    - no blocking open questions,
    - all user-sourced business decisions appear literally in `## Grill Decision Log`,
-   - final PRD confirmation is recorded with the current PRD hash,
+   - final PRD confirmation is recorded with explicit `Status: confirmed` and the current PRD hash,
+   - `implement.jsonl` / `check.jsonl` are initialized and real entries are maintained through manifest actions,
    - Stage 1 grill is finalized by `workflow_run action=finalize_grill`.
 3. Implementation has not started unless the user explicitly asks to continue after grill finalization.
 
@@ -35,7 +36,7 @@ By the end of Stage 1 grill:
 2. If `.workflow/config.json` is missing, stop and tell the user to initialize workflow first (`/workflow-init --execute`, then `/workflow-init-spec --execute --plan <plan-id>` if needed). Do not create ad-hoc task files by hand.
 3. If `workflow_next` returns `adaptiveControl.strategy: "subagent_brief"`, prefer the recommended `workflow_delegate` dry-run/execute path for bounded research before asking questions that repository/spec inspection can answer.
 4. If a planning/grill task already exists and appears to match the request, continue it. If it might be unrelated, ask before creating a duplicate.
-5. If no suitable task exists, create one with `workflow_run action=create_from_grill`: dry-run first, then execute once title and flow level are clear.
+5. If no suitable task exists, create one with `workflow_run action=create_from_grill`: dry-run first, then execute once title is clear. If flow level is omitted, the workflow config default is used.
 
 Prefer `workflow_next` for read-only routing and `workflow_run` for controlled mutations. Do not use deprecated prompt wrappers or legacy command aliases.
 
@@ -98,7 +99,7 @@ For examples, see [EXAMPLES.md](./EXAMPLES.md).
 - Acceptance Criteria, Validation Plan, and Definition of Done should use checklists so finish preflight can track completion later.
 - `## Open Questions` must be `None.` before finalization; if a blocking question remains, keep grilling.
 - Remove the initial `Outcome: TODO` created by `create_from_grill`.
-- Do not hand-write `Confirmed PRD Hash`; use `/workflow-prd-confirm` so the hash matches the current PRD body.
+- Do not hand-write `Confirmed PRD Hash`; use `/workflow-prd-confirm` so the hash matches the current PRD body and the final confirmation section contains `Status: confirmed`.
 
 ## Final confirmation and handoff
 
@@ -124,6 +125,7 @@ Do not include `stage1-final-confirm`, `final-confirmation`, or `prd-confirm` in
 - Do not bury decisions only in chat history; record them with `workflow_run` and write them into the PRD/spec.
 - Do not leave `TODO`, `TBD`, or blocking Open Questions in the PRD.
 - Do not manually fake final confirmation or a PRD hash.
+- Do not hand-write manifest JSONL when a deterministic manifest action can express the change.
 - Do not mix final confirmation with scope/runtime/validation decisions.
 - Do not force the user to choose a recommendation without showing at least one viable alternative and consequence.
 - Do not update unrelated files or overwrite unrelated dirty changes.

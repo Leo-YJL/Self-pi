@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { buildPrdKernelFromMarkdown, prdConfirmationHash, readPrdKernel } from "./prd.ts";
-import { findActiveTask, readTask, type WorkflowTaskJson } from "./task.ts";
+import { findActiveTask, tryReadTask, type WorkflowTaskJson } from "./task.ts";
 import type { RunMode, WorkflowBlocker, WorkflowWarning } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 
@@ -28,8 +28,8 @@ export interface PrdFinalConfirmationResult {
 
 export async function confirmPrdFinal(root: string, input: PrdFinalConfirmationInput = {}): Promise<PrdFinalConfirmationResult> {
   const mode = input.mode ?? "dry_run";
-  const task = input.task ? await readTask(root, input.task) : await findActiveTask(root);
-  if (!task) return blocked(mode, "missing_task", "No active workflow task found for PRD confirmation.");
+  const task = input.task ? await tryReadTask(root, input.task) : await findActiveTask(root);
+  if (!task) return blocked(mode, input.task ? "task_not_found" : "missing_task", input.task ? `Workflow task not found: ${input.task}` : "No active workflow task found for PRD confirmation.");
 
   const prdPath = `.workflow/tasks/${task.id}/prd.md`;
   const absPath = resolveInsideRoot(root, prdPath);

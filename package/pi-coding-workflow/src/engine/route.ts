@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import type { DetailMode, WorkflowContextSummary, WorkflowNextInput, WorkflowNextOutput, WorkflowOmittedArtifact, WorkflowResultMeta } from "../types.ts";
 import { readConfig } from "./config.ts";
-import { findActiveTask, readTask, type WorkflowTaskJson } from "./task.ts";
+import { listRootTasks, tryReadTask, type WorkflowTaskJson } from "./task.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 import { buildContextBundle, type WorkflowContextBundle } from "./contextBundle.ts";
 import { contextBudgetPolicy, estimateTokens, omitted, tokenBudget, truncateText } from "./contextBudget.ts";
@@ -15,8 +15,9 @@ export async function workflowNext(root: string, input: WorkflowNextInput = {}):
   const config = await readConfig(root);
   const hasWorkflow = existsSync(resolveInsideRoot(root, ".workflow"));
   const includeContext = input.includeContext ?? "lite";
-  const requestedTask = input.task ? await readTask(root, input.task) : null;
-  const activeTask = requestedTask ?? await findActiveTask(root);
+  const allTasks = hasWorkflow ? await listRootTasks(root) : [];
+  const requestedTask = hasWorkflow && input.task ? await tryReadTask(root, input.task) : null;
+  const activeTask = requestedTask ?? selectActiveTask(allTasks);
   let output: WorkflowNextOutput;
 
   if (!hasWorkflow) {
@@ -29,6 +30,17 @@ export async function workflowNext(root: string, input: WorkflowNextInput = {}):
       warnings: [{ code: "workflow_dir_missing", message: "No .workflow directory found. Run /workflow-init first." }],
       context: includeContext === "none" ? undefined : emptyContext(includeContext, "Workflow not initialized.", ["workflow:init"], input.detail),
       cache: { stableKey: "workflow-next:v2:no-workflow", cacheFriendly: true, hit: false },
+    }, startedAt);
+  } else if (input.task && !requestedTask) {
+    output = finalizeNext({
+      ok: false,
+      status: "no_task",
+      nextAction: "blocked",
+      recommendedTool: { name: "workflow_next", arguments: {} },
+      blockedBy: [{ code: "task_not_found", message: `Workflow task not found: ${input.task}`, severity: "blocking", path: `.workflow/tasks/${input.task}/task.json` }],
+      warnings: config ? [] : [{ code: "workflow_config_missing", message: "No .workflow/config.json found. Run /workflow-init first." }],
+      context: includeContext === "none" ? undefined : emptyContext(includeContext, `Workflow task not found: ${input.task}`, ["tasks:active:none"], input.detail),
+      cache: { stableKey: "workflow-next:v2:task-not-found", cacheFriendly: false, hit: false },
     }, startedAt);
   } else if (!activeTask) {
     output = finalizeNext({
@@ -45,6 +57,7 @@ export async function workflowNext(root: string, input: WorkflowNextInput = {}):
     output = finalizeNext(await routeForTask(root, config?.project.profile ?? "generic", activeTask, input), startedAt);
   }
 
+  if (hasWorkflow && !input.task) output = attachTaskCandidates(output, allTasks);
   await writeWorkflowTelemetry(root, "workflow_next", output);
   return output;
 }
@@ -64,7 +77,9 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   const telemetrySummary = await readWorkflowTelemetrySummary(root, task.id);
   const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent })) : undefined;
   const context = bundle ? contextFromBundle(bundle, input.detail, adaptiveControl) : undefined;
-  const recommendedTool = adaptiveControl?.strategy === "subagent_brief" && adaptiveControl.delegateRecommendedCall ? adaptiveControl.delegateRecommendedCall : next.recommendedTool;
+  const recommendedTool = adaptiveControl?.strategy === "deterministic_preflight" && adaptiveControl.deterministicActions[0]
+    ? adaptiveControl.deterministicActions[0]
+    : adaptiveControl?.strategy === "subagent_brief" && adaptiveControl.delegateRecommendedCall ? adaptiveControl.delegateRecommendedCall : next.recommendedTool;
   const output: WorkflowNextOutput = {
     ok: true,
     status: task.status,
@@ -91,6 +106,27 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   };
   if (workflowCacheKey) await writeWorkflowNextCache(root, workflowCacheKey, output);
   return output;
+}
+
+function selectActiveTask(tasks: WorkflowTaskJson[]): WorkflowTaskJson | null {
+  return tasks.find((task) => task.status === "in_progress")
+    ?? tasks.find((task) => task.status === "planning")
+    ?? null;
+}
+
+function attachTaskCandidates(output: WorkflowNextOutput, tasks: WorkflowTaskJson[]): WorkflowNextOutput {
+  const active = tasks.filter((task) => task.status === "in_progress" || task.status === "planning");
+  if (active.length === 0) return output;
+  const inProgress = active.filter((task) => task.status === "in_progress");
+  const planning = active.filter((task) => task.status === "planning");
+  const warnings = [...output.warnings];
+  if (inProgress.length > 1) warnings.unshift({ code: "multiple_in_progress_tasks", message: `Multiple in-progress workflow tasks exist; pass task explicitly. Candidates: ${inProgress.map((task) => task.id).slice(0, 8).join(", ")}` });
+  else if (inProgress.length === 0 && planning.length > 1) warnings.unshift({ code: "multiple_planning_tasks", message: `Multiple planning workflow tasks exist; pass task explicitly. Candidates: ${planning.map((task) => task.id).slice(0, 8).join(", ")}` });
+  return {
+    ...output,
+    warnings,
+    taskCandidates: active.slice(0, 12).map((task) => ({ id: task.id, title: task.title, status: task.status, stage: task.stage, flowLevel: task.flowLevel, updatedAt: task.updatedAt })),
+  };
 }
 
 function isWorkflowNextCacheable(includeContext: WorkflowNextInput["includeContext"], detail: WorkflowNextInput["detail"]): boolean {

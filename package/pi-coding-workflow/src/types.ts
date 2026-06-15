@@ -111,6 +111,15 @@ export interface WorkflowNextInput {
   detail?: DetailMode;
 }
 
+export interface WorkflowTaskCandidate {
+  id: string;
+  title: string;
+  status: WorkflowStatus;
+  stage: WorkflowStage;
+  flowLevel: FlowLevel;
+  updatedAt?: string;
+}
+
 export interface WorkflowNextOutput {
   ok: boolean;
   status: WorkflowStatus;
@@ -121,6 +130,7 @@ export interface WorkflowNextOutput {
   recommendedTool?: WorkflowRecommendedCall;
   blockedBy: WorkflowBlocker[];
   warnings: WorkflowWarning[];
+  taskCandidates?: WorkflowTaskCandidate[];
   context?: WorkflowContextSummary;
   evidenceRefs?: string[];
   omitted?: WorkflowOmittedArtifact[];
@@ -181,7 +191,7 @@ export interface WorkflowGrillState {
   finalizedAt?: string;
 }
 
-export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "record_round_and_update_prd" | "append_prd_decisions" | "update_prd_section" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "batch";
+export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "record_round_and_update_prd" | "append_prd_decisions" | "update_prd_section" | "init_manifests" | "upsert_manifest_entry" | "remove_manifest_entry" | "sync_manifest_from_diff" | "list_tasks" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "reopen" | "batch";
 export type WorkflowRunSingleAction = Exclude<WorkflowRunAction, "batch">;
 export type WorkflowPrdUpdateMode = "replace" | "append";
 
@@ -201,6 +211,14 @@ export interface WorkflowPrdSectionUpdateInput {
   prdContent: string;
   prdUpdateMode?: WorkflowPrdUpdateMode;
 }
+
+export interface WorkflowManifestEntryInput {
+  file: string;
+  reason: string;
+}
+
+export type WorkflowManifestAgent = "implement" | "check";
+export type WorkflowManifestEntryMode = "append" | "replace";
 
 export interface WorkflowRunBatchItem {
   action: WorkflowRunSingleAction;
@@ -231,6 +249,13 @@ export interface WorkflowRunBatchItem {
   decisions?: WorkflowRoundDecisionInput[];
   prdUpdates?: WorkflowPrdSectionUpdateInput[];
   appendPrdDecisions?: boolean;
+  manifest?: WorkflowManifestAgent;
+  file?: string;
+  reason?: string;
+  entryMode?: WorkflowManifestEntryMode;
+  implementEntries?: WorkflowManifestEntryInput[];
+  checkEntries?: WorkflowManifestEntryInput[];
+  overwrite?: boolean;
 }
 
 export interface WorkflowRunInput {
@@ -262,6 +287,13 @@ export interface WorkflowRunInput {
   decisions?: WorkflowRoundDecisionInput[];
   prdUpdates?: WorkflowPrdSectionUpdateInput[];
   appendPrdDecisions?: boolean;
+  manifest?: WorkflowManifestAgent;
+  file?: string;
+  reason?: string;
+  entryMode?: WorkflowManifestEntryMode;
+  implementEntries?: WorkflowManifestEntryInput[];
+  checkEntries?: WorkflowManifestEntryInput[];
+  overwrite?: boolean;
   /** Internal evidence captured by workflow_run before recording a decision. */
   prdHashBefore?: string;
   /** Internal evidence captured by workflow_run before recording a decision. */
@@ -278,7 +310,7 @@ export interface WorkflowArtifactRef {
 export interface WorkflowRollbackHint {
   actionIndex: number;
   action: WorkflowRunSingleAction;
-  kind: "remove_created_task" | "restore_task_json" | "manual";
+  kind: "remove_created_task" | "restore_task_json" | "manual" | "restore_archived_task";
   path?: string;
   summary: string;
   data?: unknown;
@@ -370,6 +402,7 @@ export interface WorkflowRunOutput {
   results?: WorkflowRunOutput[];
   transaction?: WorkflowTransaction;
   rollbackHints?: WorkflowRollbackHint[];
+  tasks?: WorkflowTaskCandidate[];
 }
 
 export interface ProjectWorkflowConfig {

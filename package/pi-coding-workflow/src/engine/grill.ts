@@ -1,6 +1,7 @@
 import type { FlowLevel, WorkflowBlocker, WorkflowGrillDecision, WorkflowGrillDecisionSource, WorkflowGrillRound, WorkflowGrillRoundKind, WorkflowGrillState, WorkflowRunInput } from "../types.ts";
 import type { WorkflowTaskJson } from "./task.ts";
 import { readPrdKernel, type PrdKernel } from "./prd.ts";
+import { isFinalConfirmationDecisionId } from "./identifiers.ts";
 
 const HARD_GRILL_LEVELS = new Set<FlowLevel>(["standard", "complex", "goal"]);
 const HUMAN_DECISION_SOURCES = new Set<WorkflowGrillDecisionSource>(["ask_user_question", "user", "command", "fast_path"]);
@@ -407,8 +408,4 @@ function decisionsRequiringPrd(task: WorkflowTaskJson): WorkflowGrillDecision[] 
     && (decision.persistTo ?? "prd") === "prd"
     && !isFinalConfirmationDecisionId(decision.id)
   );
-}
-
-function isFinalConfirmationDecisionId(id: string): boolean {
-  return /(?:stage1[-_.])?final[-_.]?confirm|final[-_.]?confirmation|prd[-_.]?confirm/i.test(id);
 }

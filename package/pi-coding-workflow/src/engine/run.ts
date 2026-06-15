@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import type { WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
-import { createTask, findActiveTask, readTask, slugify, todayPrefix, writeTask, type WorkflowTaskJson } from "./task.ts";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import type { FlowLevel, WorkflowManifestAgent, WorkflowManifestEntryInput, WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
+import { createTask, findActiveTask, listRootTasks, readTask, slugify, todayPrefix, tryReadTask, writeTask, type WorkflowTaskJson } from "./task.ts";
 import { checkpoint } from "./checkpoint.ts";
 import { validateTask } from "./validate.ts";
 import { estimateTokens, RUN_RESULT_TARGET_TOKENS } from "./contextBudget.ts";
@@ -10,7 +12,11 @@ import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
 import { writeWorkflowTelemetry } from "./telemetry.ts";
 import { appendGrillDecision, finalizeGrillState, refreshGrillPrdCoverage, validateGrillFinalization } from "./grill.ts";
 import { appendPrdDecisionLog, readPrdKernel, updatePrdSection, type PrdSectionKey } from "./prd.ts";
-import { resolveInsideRoot } from "../safety/pathPolicy.ts";
+import { assertRepoRelative, normalizeSlash, resolveInsideRoot } from "../safety/pathPolicy.ts";
+import { readConfig } from "./config.ts";
+import { initTaskManifests, removeManifestEntry, upsertManifestEntry } from "./manifest.ts";
+
+const execFileAsync = promisify(execFile);
 
 const PRD_SECTION_KEYS = new Set<PrdSectionKey>(["executionContract", "goal", "requirements", "acceptanceCriteria", "validationPlan", "openQuestions", "finalConfirmation", "outOfScope", "definitionOfDone", "grillResult", "architectureImpact"]);
 
@@ -100,19 +106,26 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
   }
 
   if (action === "create_from_grill") {
-    if (!input.title || !input.level) return blocked(action, mode, "missing_title_or_level", "create_from_grill requires title and level.");
+    if (!input.title) return blocked(action, mode, "missing_title", "create_from_grill requires title.");
+    const level = await flowLevelForCreate(root, input.level);
     const plannedTask = `${todayPrefix()}-${input.slug ?? slugify(input.title)}`;
-    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run create_from_grill; would create task ${plannedTask}.`), task: plannedTask, status: "planning", stage: "grill", nextAction: "execute_create_from_grill" };
-    const task = await createTask(root, input.title, input.level, input.slug);
-    return { ...ok(action, mode, true, `Created task ${task.id}`), task: task.id, status: task.status, stage: task.stage, nextAction: "write_prd_manifests_and_grill_decisions" };
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run create_from_grill; would create task ${plannedTask} with flowLevel=${level} and manifest skeletons.`), task: plannedTask, status: "planning", stage: "grill", nextAction: "execute_create_from_grill" };
+    const task = await createTask(root, input.title, level, input.slug);
+    return { ...ok(action, mode, true, `Created task ${task.id} with PRD and manifest skeletons.`), task: task.id, status: task.status, stage: task.stage, nextAction: "upsert_manifest_entries_and_grill_decisions" };
   }
 
   if (action === "create_child") {
-    if (!input.title || !input.level || !input.parentTask) return blocked(action, mode, "missing_child_fields", "create_child requires title, level and parentTask.");
+    if (!input.title || !input.parentTask) return blocked(action, mode, "missing_child_fields", "create_child requires title and parentTask.");
+    const level = await flowLevelForCreate(root, input.level);
     const plannedTask = `${todayPrefix()}-${input.slug ?? slugify(input.title)}`;
-    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run create_child; would create child task ${plannedTask}.`), task: plannedTask, status: "planning", stage: "grill", nextAction: "execute_create_child" };
-    const task = await createTask(root, input.title, input.level, input.slug, input.parentTask);
-    return { ...ok(action, mode, true, `Created child task ${task.id}`), task: task.id, status: task.status, stage: task.stage, nextAction: "write_child_prd_manifests_and_grill_decisions" };
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run create_child; would create child task ${plannedTask} with flowLevel=${level} and manifest skeletons.`), task: plannedTask, status: "planning", stage: "grill", nextAction: "execute_create_child" };
+    const task = await createTask(root, input.title, level, input.slug, input.parentTask);
+    return { ...ok(action, mode, true, `Created child task ${task.id} with PRD and manifest skeletons.`), task: task.id, status: task.status, stage: task.stage, nextAction: "upsert_child_manifest_entries_and_grill_decisions" };
+  }
+
+  if (action === "list_tasks") {
+    const tasks = await listRootTasks(root);
+    return { ...ok(action, mode, false, tasks.length > 0 ? `Found ${tasks.length} workflow task(s).` : "No workflow tasks found."), tasks: tasks.map(taskSummary) as any, preflight: { tasks: tasks.map(taskSummary) }, nextAction: tasks.length > 0 ? "select_task" : "no_task_grill" };
   }
 
   if (action === "record_grill_decision") {
@@ -235,6 +248,74 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     return { ...ok(action, mode, updated.changed, summary), task: task.id, status: task.status, stage: task.stage, nextAction: "continue" };
   }
 
+  if (action === "init_manifests") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "init_manifests requires task or an active task.");
+    if (task.status === "completed") return blocked(action, mode, "task_completed", "init_manifests cannot mutate a completed task.");
+    const implementEntries = manifestEntriesFromInput(input.implementEntries);
+    const checkEntries = manifestEntriesFromInput(input.checkEntries);
+    const entryError = implementEntries.error ?? checkEntries.error;
+    if (entryError) return blocked(action, mode, entryError.code, entryError.message);
+    const implementCount = implementEntries.entries.length;
+    const checkCount = checkEntries.entries.length;
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run init_manifests; would ensure manifest skeletons for ${task.id} and upsert ${implementCount} implement / ${checkCount} check entr${implementCount + checkCount === 1 ? "y" : "ies"}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_init_manifests" };
+    const initialized = await initTaskManifests(root, task, { overwrite: input.overwrite === true });
+    const changed: string[] = [initialized.implement, initialized.check].filter((result) => result.changed).map((result) => result.path);
+    for (const entry of implementEntries.entries) {
+      const result = await upsertManifestEntry(root, task, "implement", entry);
+      if (result.changed) changed.push(result.path);
+    }
+    for (const entry of checkEntries.entries) {
+      const result = await upsertManifestEntry(root, task, "check", entry);
+      if (result.changed) changed.push(result.path);
+    }
+    return { ...ok(action, mode, changed.length > 0, `Initialized manifest skeletons for ${task.id}; upserted ${implementCount} implement / ${checkCount} check entries.`), task: task.id, status: task.status, stage: task.stage, artifacts: [...new Set(changed)].map((ref) => ({ kind: "manifest", ref, summary: "manifest updated" })), nextAction: "continue_grill_or_start_checked" };
+  }
+
+  if (action === "upsert_manifest_entry") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "upsert_manifest_entry requires task or an active task.");
+    if (task.status === "completed") return blocked(action, mode, "task_completed", "upsert_manifest_entry cannot mutate a completed task.");
+    const manifest = parseManifestAgent(input.manifest);
+    if (!manifest) return blocked(action, mode, "missing_manifest", "upsert_manifest_entry requires manifest=implement or manifest=check.");
+    const entry = manifestEntryFromInput(input.file, input.reason ?? input.message ?? input.notes);
+    if (entry.error) return blocked(action, mode, entry.error.code, entry.error.message);
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run upsert_manifest_entry; would upsert ${entry.entry.file} into ${manifest}.jsonl.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_upsert_manifest_entry" };
+    const result = await upsertManifestEntry(root, task, manifest, entry.entry);
+    return { ...ok(action, mode, result.changed, result.summary), task: task.id, status: task.status, stage: task.stage, artifacts: [{ kind: "manifest", ref: result.path, summary: result.summary }], nextAction: "continue_grill_or_start_checked" };
+  }
+
+  if (action === "remove_manifest_entry") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "remove_manifest_entry requires task or an active task.");
+    if (task.status === "completed") return blocked(action, mode, "task_completed", "remove_manifest_entry cannot mutate a completed task.");
+    const manifest = parseManifestAgent(input.manifest);
+    if (!manifest) return blocked(action, mode, "missing_manifest", "remove_manifest_entry requires manifest=implement or manifest=check.");
+    const file = manifestFileFromInput(input.file);
+    if (file.error) return blocked(action, mode, file.error.code, file.error.message);
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run remove_manifest_entry; would remove ${file.file} from ${manifest}.jsonl.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_remove_manifest_entry" };
+    const result = await removeManifestEntry(root, task, manifest, file.file);
+    return { ...ok(action, mode, result.changed, result.summary), task: task.id, status: task.status, stage: task.stage, artifacts: [{ kind: "manifest", ref: result.path, summary: result.summary }], nextAction: "continue_grill_or_start_checked" };
+  }
+
+  if (action === "sync_manifest_from_diff") {
+    const task = await resolveTask(root, input.task);
+    if (!task) return blocked(action, mode, "missing_task", "sync_manifest_from_diff requires task or an active task.");
+    const candidates = await gitChangedFiles(root);
+    if (mode !== "execute") return { ...ok(action, mode, false, candidates.length > 0 ? `Dry-run sync_manifest_from_diff; found ${candidates.length} changed file candidate(s).` : "Dry-run sync_manifest_from_diff; no git changed files found."), task: task.id, status: task.status, stage: task.stage, preflight: { candidates }, nextAction: candidates.length > 0 ? "upsert_manifest_entry" : "continue" };
+    const manifest = parseManifestAgent(input.manifest);
+    if (!manifest) return blocked(action, mode, "missing_manifest", "sync_manifest_from_diff execute requires manifest=implement or manifest=check plus explicit entries/reasons.");
+    const entries = manifestEntriesFromInput(manifest === "implement" ? input.implementEntries : input.checkEntries);
+    if (entries.error) return blocked(action, mode, entries.error.code, entries.error.message);
+    if (entries.entries.length === 0) return blocked(action, mode, "missing_manifest_entries", "sync_manifest_from_diff execute requires explicit entries with file and reason; dry_run lists candidates only.");
+    const changed: string[] = [];
+    for (const entry of entries.entries) {
+      const result = await upsertManifestEntry(root, task, manifest, entry);
+      if (result.changed) changed.push(result.path);
+    }
+    return { ...ok(action, mode, changed.length > 0, `Synced ${entries.entries.length} explicit ${manifest} manifest entr${entries.entries.length === 1 ? "y" : "ies"} from diff review.`), task: task.id, status: task.status, stage: task.stage, preflight: { candidates }, artifacts: [...new Set(changed)].map((ref) => ({ kind: "manifest", ref, summary: "manifest synced" })), nextAction: "continue" };
+  }
+
   if (action === "append_prd_decisions") {
     const task = await resolveTask(root, input.task);
     if (!task) return blocked(action, mode, "missing_task", "append_prd_decisions requires task or an active planning task.");
@@ -318,8 +399,36 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
   }
 
   if (action === "archive") {
+    const task = input.task ? await resolveTask(root, input.task) : await findLatestCompletedTask(root);
+    if (!task) return blocked(action, mode, "missing_task", "archive requires task or an active completed task.");
+    if (task.status !== "completed" || task.stage !== "finish") return blocked(action, mode, "task_not_completed", `archive requires completed/finish, got ${task.status}/${task.stage}.`);
     if (!input.userConfirmed) return blocked(action, mode, "user_confirmation_required", "archive requires userConfirmed=true.");
-    return { ...ok(action, mode, false, "Archive is reserved for project-specific policy in v1."), nextAction: "none" };
+    const sourceRel = `.workflow/tasks/${task.id}`;
+    const targetRel = `.workflow/tasks/archive/${task.id}`;
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run archive; would move ${sourceRel} to ${targetRel}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_archive" };
+    const source = resolveInsideRoot(root, sourceRel);
+    const target = resolveInsideRoot(root, targetRel);
+    if (existsSync(target)) return blocked(action, mode, "archive_target_exists", `${targetRel} already exists.`);
+    await mkdir(resolveInsideRoot(root, ".workflow/tasks/archive"), { recursive: true });
+    await rename(source, target);
+    return { ...ok(action, mode, true, `Archived task ${task.id} to ${targetRel}.`), task: task.id, status: task.status, stage: task.stage, artifacts: [{ kind: "archive", ref: targetRel, summary: `Archived ${task.id}` }], nextAction: "none" };
+  }
+
+  if (action === "reopen") {
+    const task = input.task ? await resolveTask(root, input.task) : await findLatestCompletedTask(root);
+    if (!task) return blocked(action, mode, "missing_task", "reopen requires a completed task.");
+    if (task.status !== "completed" || task.stage !== "finish") return blocked(action, mode, "task_not_completed", `reopen requires completed/finish, got ${task.status}/${task.stage}.`);
+    const reason = (input.message ?? input.notes ?? "").trim();
+    if (!reason) return blocked(action, mode, "missing_message", "reopen requires message or notes explaining the reason.");
+    if (!input.userConfirmed) return blocked(action, mode, "user_confirmation_required", "reopen requires userConfirmed=true.");
+    if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run reopen; would move ${task.id} back to in_progress/execute.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_reopen" };
+    const meta = task.meta ?? {};
+    const reopenLog = Array.isArray(meta.reopenLog) ? meta.reopenLog : [];
+    task.meta = { ...meta, reopenLog: [...reopenLog, { reason, reopenedAt: new Date().toISOString() }] };
+    task.status = "in_progress";
+    task.stage = "execute";
+    await writeTask(root, task);
+    return { ...ok(action, mode, true, `Reopened task ${task.id}: ${reason}`), task: task.id, status: task.status, stage: task.stage, nextAction: "checkpoint" };
   }
 
   return blocked(action, mode, "unknown_action", `Unknown action: ${action}`);
@@ -423,9 +532,73 @@ function plannedAction(item: WorkflowRunBatchItem, input: WorkflowRunInput, mode
   };
 }
 
+async function flowLevelForCreate(root: string, explicit?: FlowLevel): Promise<FlowLevel> {
+  if (explicit) return explicit;
+  const config = await readConfig(root);
+  const fallback = config?.workflow?.defaultFlowLevel;
+  return fallback === "simple" || fallback === "standard" || fallback === "complex" || fallback === "goal" ? fallback : "standard";
+}
+
+function taskSummary(task: WorkflowTaskJson): Record<string, unknown> {
+  return { id: task.id, title: task.title, status: task.status, stage: task.stage, flowLevel: task.flowLevel, parentTask: task.parentTask, updatedAt: task.updatedAt };
+}
+
+function parseManifestAgent(value: unknown): WorkflowManifestAgent | null {
+  return value === "implement" || value === "check" ? value : null;
+}
+
+function manifestEntryFromInput(file: unknown, reason: unknown): { entry: WorkflowManifestEntryInput; error?: never } | { entry?: never; error: { code: string; message: string } } {
+  const parsedFile = manifestFileFromInput(file);
+  if (parsedFile.error) return { error: parsedFile.error };
+  const parsedReason = typeof reason === "string" ? reason.trim() : "";
+  if (!parsedReason) return { error: { code: "missing_manifest_reason", message: "Manifest entry requires reason." } };
+  return { entry: { file: parsedFile.file, reason: parsedReason } };
+}
+
+function manifestFileFromInput(file: unknown): { file: string; error?: never } | { file?: never; error: { code: string; message: string } } {
+  if (typeof file !== "string" || !file.trim()) return { error: { code: "missing_manifest_file", message: "Manifest entry requires file." } };
+  const normalized = normalizeSlash(file.trim());
+  try {
+    assertRepoRelative(normalized);
+  } catch (error) {
+    return { error: { code: "manifest_file_outside_root", message: error instanceof Error ? error.message : String(error) } };
+  }
+  return { file: normalized };
+}
+
+function manifestEntriesFromInput(raw: unknown): { entries: WorkflowManifestEntryInput[]; error?: never } | { entries: WorkflowManifestEntryInput[]; error: { code: string; message: string } } {
+  if (raw === undefined) return { entries: [] };
+  if (!Array.isArray(raw)) return { entries: [], error: { code: "invalid_manifest_entries", message: "Manifest entries must be an array." } };
+  const entries: WorkflowManifestEntryInput[] = [];
+  for (const [index, item] of raw.entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return { entries, error: { code: "invalid_manifest_entry", message: `Manifest entry ${index} must be an object.` } };
+    const obj = item as Record<string, unknown>;
+    const parsed = manifestEntryFromInput(obj.file, obj.reason);
+    if (parsed.error) return { entries, error: { code: parsed.error.code, message: `Manifest entry ${index}: ${parsed.error.message}` } };
+    entries.push(parsed.entry);
+  }
+  return { entries };
+}
+
+async function gitChangedFiles(root: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", root, "status", "--short"], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+    return stdout.split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter(Boolean)
+      .map((line) => normalizeSlash(line.slice(3).replace(/.* -> /, "")))
+      .filter(Boolean)
+      .filter((file) => !file.startsWith(".workflow/.runtime/"))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 async function taskSnapshotForRollback(root: string, input: WorkflowRunInput): Promise<WorkflowTaskJson | null> {
   try {
     if (input.task) return await readTask(root, input.task);
+    if (input.action === "archive" || input.action === "reopen") return await findLatestCompletedTask(root);
     if (input.action === "record_grill_decision" || input.action === "record_round_and_update_prd" || input.action === "append_prd_decisions" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") return await findActiveTask(root);
   } catch {
     return null;
@@ -455,7 +628,16 @@ function rollbackHintsFor(index: number, input: WorkflowRunInput, output: Workfl
       summary: `Review git diff or transaction artifact to revert PRD changes for ${output.task}.`,
     });
   }
-  if ((input.action === "record_grill_decision" || input.action === "record_round_and_update_prd" || input.action === "append_prd_decisions" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run") && beforeTask) {
+  if (input.action === "archive" && output.task) {
+    hints.push({
+      actionIndex: index,
+      action: input.action,
+      kind: "restore_archived_task",
+      path: `.workflow/tasks/archive/${output.task}`,
+      summary: `Move .workflow/tasks/archive/${output.task} back to .workflow/tasks/${output.task} if archive should be rolled back.`,
+    });
+  }
+  if ((input.action === "record_grill_decision" || input.action === "record_round_and_update_prd" || input.action === "append_prd_decisions" || input.action === "finalize_grill" || input.action === "start_checked" || input.action === "finish_run" || input.action === "reopen") && beforeTask) {
     hints.push({
       actionIndex: index,
       action: input.action,
@@ -468,8 +650,13 @@ function rollbackHintsFor(index: number, input: WorkflowRunInput, output: Workfl
   return hints;
 }
 
+async function findLatestCompletedTask(root: string): Promise<WorkflowTaskJson | null> {
+  const tasks = await listRootTasks(root);
+  return tasks.find((task) => task.status === "completed") ?? null;
+}
+
 async function resolveTask(root: string, id?: string): Promise<WorkflowTaskJson | null> {
-  if (id) return readTask(root, id);
+  if (id) return tryReadTask(root, id);
   return findActiveTask(root);
 }
 

@@ -754,7 +754,7 @@ test("start preflight blocks missing PRD", async () => {
   assert.ok(blockerCodes(start).includes("prd_missing"));
 });
 
-test("start preflight blocks PRD TODO and missing manifest files", async () => {
+test("start preflight blocks PRD TODO and empty manifest skeletons", async () => {
   const root = await mkdtemp(join(tmpdir(), "pcw-p1-todo-manifest-"));
   await executeInitWorkspace(root, "generic");
   const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "TODO PRD", level: "complex", slug: "todo-prd" });
@@ -764,8 +764,8 @@ test("start preflight blocks PRD TODO and missing manifest files", async () => {
   const start = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: create.task });
   assert.equal(start.ok, false);
   assert.ok(blockerCodes(start).includes("prd_todo_present"));
-  assert.ok(blockerCodes(start).includes("implement_manifest_missing"));
-  assert.ok(blockerCodes(start).includes("check_manifest_missing"));
+  assert.ok(blockerCodes(start).includes("implement_manifest_empty"));
+  assert.ok(blockerCodes(start).includes("check_manifest_empty"));
 });
 
 test("start preflight blocks blocking open questions", async () => {

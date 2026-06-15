@@ -3,9 +3,9 @@ import { appendFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { WorkflowDelegateOutput, WorkflowNextOutput, WorkflowRunOutput, WorkflowWarning } from "../types.ts";
 import { normalizeSlash, resolveInsideRoot } from "../safety/pathPolicy.ts";
+import { PACKAGE_VERSION } from "../version.ts";
 
 const TELEMETRY_SCHEMA_VERSION = 1;
-const PACKAGE_VERSION = "0.1.0";
 const MAX_TELEMETRY_FILE_BYTES = 512 * 1024;
 
 export type WorkflowTelemetryEventName = "workflow_next" | "workflow_run" | "workflow_delegate";

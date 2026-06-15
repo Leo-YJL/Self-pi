@@ -3,9 +3,9 @@ import type { FlowLevel, WorkflowBlocker, WorkflowWarning } from "../types.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 import type { WorkflowTaskJson } from "./task.ts";
 import { evaluatePrdChecklistGate, prdGateToBlocker, readPrdKernel, type PrdKernel } from "./prd.ts";
-import { manifestFiles, manifestIssuesToBlockers, readTaskManifests, type WorkflowManifestSummary } from "./manifest.ts";
+import { manifestFiles, readTaskManifests, type WorkflowManifestSummary } from "./manifest.ts";
 import { readWorkspaceSummary, runGitDiffCheck, type GitDiffCheckResult, type WorkspaceSummary } from "./workspace.ts";
-import { grillPrdGateBlockers, grillStartBlockers } from "./grill.ts";
+import { computeStartBlockers, computeStartWarnings } from "./startGate.ts";
 
 export interface TaskValidationResult {
   passed: boolean;
@@ -56,27 +56,13 @@ async function validateStart(
   warnings: WorkflowWarning[],
   details: TaskValidationDetails,
 ): Promise<void> {
-  const taskDir = `.workflow/tasks/${task.id}`;
-  if (task.status !== "planning") blockedBy.push({ code: "task_not_planning", message: `start_checked requires planning status, got ${task.status}.`, severity: "blocking", path: `${taskDir}/task.json` });
-  if (task.stage !== "grill") blockedBy.push({ code: "stage_not_grill", message: `start_checked requires stage=grill, got ${task.stage}.`, severity: "blocking", path: `${taskDir}/task.json` });
-  blockedBy.push(...grillStartBlockers(task));
-
-  if (prd.source.exists) {
-    if (prd.quality.hasTodo) blockedBy.push({ code: "prd_todo_present", message: "PRD contains TODO/TBD markers; resolve them before start_checked.", severity: "blocking", path: prd.source.path });
-    if (prd.openQuestions.blocking) blockedBy.push({ code: "prd_open_questions_blocking", message: `PRD has blocking open questions: ${prd.openQuestions.summary}`, severity: "blocking", path: prd.source.path });
-    if (!prd.finalConfirmation.confirmed) blockedBy.push({ code: "prd_final_confirmation_missing", message: "PRD final confirmation is missing or not confirmed.", severity: "blocking", path: prd.source.path });
-    blockedBy.push(...grillPrdGateBlockers(task, prd));
-  }
-
   const manifests = await readTaskManifests(root, task);
   details.manifests = manifests;
-  blockedBy.push(...manifestIssuesToBlockers(manifests.implement), ...manifestIssuesToBlockers(manifests.check));
+  blockedBy.push(...computeStartBlockers(task, prd, manifests));
 
   const workspace = await readWorkspaceSummary(root, { inScopeFiles: manifestFiles(manifests), taskId: task.id });
   details.workspace = workspace;
-  if (workspace.isGit && workspace.unrelatedCount > 0) {
-    warnings.push({ code: "workspace_unrelated_dirty", message: `${workspace.unrelatedCount} dirty files are outside manifest/task scope; verify they are intentional before starting.` });
-  }
+  warnings.push(...computeStartWarnings(workspace));
 }
 
 async function validateFinish(

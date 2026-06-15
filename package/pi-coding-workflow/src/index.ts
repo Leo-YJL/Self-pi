@@ -11,7 +11,7 @@ import { confirmPrdFinal } from "./engine/prdConfirm.ts";
 import { buildWorkflowCompactionSummary } from "./engine/compaction.ts";
 
 const PROFILE_VALUES = ["generic", "unity"] as const;
-const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "record_round_and_update_prd", "append_prd_decisions", "update_prd_section", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive"] as const;
+const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "record_round_and_update_prd", "append_prd_decisions", "update_prd_section", "init_manifests", "upsert_manifest_entry", "remove_manifest_entry", "sync_manifest_from_diff", "list_tasks", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive", "reopen"] as const;
 const ACTION_VALUES = [...SINGLE_ACTION_VALUES, "batch"] as const;
 const FLOW_VALUES = ["simple", "standard", "complex", "goal"] as const;
 const CONTEXT_VALUES = ["none", "lite", "brief", "task", "check", "finish"] as const;
@@ -25,6 +25,8 @@ const GRILL_PERSIST_VALUES = ["prd", "spec", "none"] as const;
 const GRILL_ROUND_KIND_VALUES = ["scope", "runtime", "validation", "final_confirmation", "custom"] as const;
 const PRD_SECTION_VALUES = ["executionContract", "goal", "requirements", "acceptanceCriteria", "validationPlan", "openQuestions", "finalConfirmation", "outOfScope", "definitionOfDone", "grillResult", "architectureImpact"] as const;
 const PRD_UPDATE_MODE_VALUES = ["replace", "append"] as const;
+const MANIFEST_AGENT_VALUES = ["implement", "check"] as const;
+const MANIFEST_ENTRY_MODE_VALUES = ["append", "replace"] as const;
 
 const WorkflowRoundDecisionSchema = Type.Object({
   decisionId: Type.String(),
@@ -41,6 +43,11 @@ const WorkflowPrdSectionUpdateSchema = Type.Object({
   prdSection: StringEnum(PRD_SECTION_VALUES),
   prdContent: Type.String(),
   prdUpdateMode: Type.Optional(StringEnum(PRD_UPDATE_MODE_VALUES)),
+});
+
+const WorkflowManifestEntrySchema = Type.Object({
+  file: Type.String(),
+  reason: Type.String(),
 });
 
 const WorkflowRunBatchItemSchema = Type.Object({
@@ -72,6 +79,13 @@ const WorkflowRunBatchItemSchema = Type.Object({
   decisions: Type.Optional(Type.Array(WorkflowRoundDecisionSchema)),
   prdUpdates: Type.Optional(Type.Array(WorkflowPrdSectionUpdateSchema)),
   appendPrdDecisions: Type.Optional(Type.Boolean()),
+  manifest: Type.Optional(StringEnum(MANIFEST_AGENT_VALUES)),
+  file: Type.Optional(Type.String()),
+  reason: Type.Optional(Type.String()),
+  entryMode: Type.Optional(StringEnum(MANIFEST_ENTRY_MODE_VALUES)),
+  implementEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
+  checkEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
+  overwrite: Type.Optional(Type.Boolean()),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -171,6 +185,13 @@ export default function (pi: ExtensionAPI) {
       decisions: Type.Optional(Type.Array(WorkflowRoundDecisionSchema)),
       prdUpdates: Type.Optional(Type.Array(WorkflowPrdSectionUpdateSchema)),
       appendPrdDecisions: Type.Optional(Type.Boolean()),
+      manifest: Type.Optional(StringEnum(MANIFEST_AGENT_VALUES)),
+      file: Type.Optional(Type.String()),
+      reason: Type.Optional(Type.String()),
+      entryMode: Type.Optional(StringEnum(MANIFEST_ENTRY_MODE_VALUES)),
+      implementEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
+      checkEntries: Type.Optional(Type.Array(WorkflowManifestEntrySchema)),
+      overwrite: Type.Optional(Type.Boolean()),
       actions: Type.Optional(Type.Array(WorkflowRunBatchItemSchema)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
