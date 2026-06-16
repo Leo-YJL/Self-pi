@@ -23,6 +23,7 @@ export interface WorkflowTelemetryEvent {
   action?: string;
   mode?: string;
   nextAction?: string;
+  contextMode?: string;
   cacheHit?: boolean;
   estimatedTokens?: number;
   targetTokens?: number;
@@ -46,6 +47,8 @@ export interface WorkflowTelemetryWriteResult {
 export interface WorkflowTelemetrySummary {
   task?: string;
   workflowNextCount: number;
+  workflowNextSignalCount: number;
+  workflowNextLiteCount: number;
   workflowRunCount: number;
   workflowDelegateCount: number;
   estimatedTokens: number;
@@ -59,16 +62,20 @@ const WARN_ESTIMATED_TOKENS = 80_000;
 
 export async function readWorkflowTelemetrySummary(root: string, task?: string): Promise<WorkflowTelemetrySummary> {
   const events = await readRecentTelemetryEvents(root, task);
-  const workflowNextCount = events.filter((event) => event.event === "workflow_next").length;
+  const workflowNextEvents = events.filter((event) => event.event === "workflow_next");
+  const workflowNextCount = workflowNextEvents.length;
+  const workflowNextSignalCount = workflowNextEvents.filter((event) => event.contextMode === "signal").length;
+  const workflowNextLiteCount = workflowNextEvents.filter((event) => event.contextMode === "lite").length;
   const workflowRunCount = events.filter((event) => event.event === "workflow_run").length;
   const workflowDelegateCount = events.filter((event) => event.event === "workflow_delegate").length;
   const estimatedTokens = events.reduce((sum, event) => sum + (Number.isFinite(event.estimatedTokens) ? event.estimatedTokens ?? 0 : 0), 0);
   const warnings: WorkflowWarning[] = [];
   if (workflowNextCount >= WARN_WORKFLOW_NEXT_COUNT) warnings.push({ code: "workflow_next_repeated", message: `workflow_next has been called ${workflowNextCount} time(s) for ${task ?? "this workspace"}; consider batching deterministic steps or using cached evidence refs.` });
+  if (workflowNextLiteCount >= WARN_WORKFLOW_NEXT_COUNT && workflowNextSignalCount === 0) warnings.push({ code: "workflow_next_signal_suggested", message: `workflow_next has used lite context ${workflowNextLiteCount} time(s) with no signal calls for ${task ?? "this workspace"}; prefer includeContext=signal for routing and request richer context only when refs are insufficient.` });
   if (workflowRunCount >= WARN_WORKFLOW_RUN_COUNT) warnings.push({ code: "workflow_run_repeated", message: `workflow_run has been called ${workflowRunCount} time(s) for ${task ?? "this workspace"}; consider combining deterministic actions with batch.` });
   if (workflowDelegateCount >= WARN_WORKFLOW_DELEGATE_COUNT) warnings.push({ code: "workflow_delegate_repeated", message: `workflow_delegate has been called ${workflowDelegateCount} time(s) for ${task ?? "this workspace"}; narrow the delegate objective or continue manually from the artifact summary.` });
   if (estimatedTokens >= WARN_ESTIMATED_TOKENS) warnings.push({ code: "workflow_estimated_tokens_high", message: `Workflow telemetry estimated ${estimatedTokens} tokens for ${task ?? "this workspace"}; consider compaction or a fresh task/session.` });
-  return { task, workflowNextCount, workflowRunCount, workflowDelegateCount, estimatedTokens, warnings };
+  return { task, workflowNextCount, workflowNextSignalCount, workflowNextLiteCount, workflowRunCount, workflowDelegateCount, estimatedTokens, warnings };
 }
 
 export async function writeWorkflowTelemetry(root: string, event: WorkflowTelemetryEventName, output: WorkflowNextOutput | WorkflowRunOutput | WorkflowDelegateOutput): Promise<WorkflowTelemetryWriteResult> {
@@ -143,13 +150,14 @@ function toTelemetryEvent(event: WorkflowTelemetryEventName, output: WorkflowNex
     action: run?.action,
     mode: run?.mode,
     nextAction: output.nextAction,
+    contextMode: next?.context?.mode,
     cacheHit: output.meta?.cacheHit ?? next?.cache?.hit ?? next?.tokenBudget?.cacheHit,
     estimatedTokens: output.meta?.estimatedTokens ?? next?.tokenBudget?.estimatedInput,
     targetTokens: output.meta?.targetTokens ?? output.meta?.maxRecommendedTokens ?? next?.tokenBudget?.maxRecommended,
     truncatedBytes: output.meta?.truncatedBytes ?? next?.tokenBudget?.truncatedBytes,
     omittedRefs,
     artifactRefs,
-    blockerCodes: output.blockedBy.map((blocker) => blocker.code),
+    blockerCodes: next?.blockedCodes ?? output.blockedBy.map((blocker) => blocker.code),
     warningCodes: output.warnings.map((warning) => warning.code),
     transaction: run?.transaction ? {
       id: run.transaction.id,

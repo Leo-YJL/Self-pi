@@ -26,7 +26,6 @@ export async function workflowNext(root: string, input: WorkflowNextInput = {}):
       ok: true,
       status: "no_task",
       nextAction: "ask_user",
-      recommendedTool: { name: "workflow_run", arguments: { action: "checkpoint", mode: "dry_run" } },
       blockedBy: [],
       warnings: [{ code: "workflow_dir_missing", message: "No .workflow directory found. Run /workflow-init first." }],
       context: includeContext === "none" ? undefined : emptyContext(includeContext, "Workflow not initialized.", ["workflow:init"], input.detail),
@@ -77,7 +76,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   const bundle = includeContext === "none" ? null : await buildContextBundle(root, task, { mode: includeContext, agent: input.agent, profile, detail: input.detail });
   const telemetrySummary = await readWorkflowTelemetrySummary(root, task.id);
   const includeDecisionCards = input.detail === "normal" || input.detail === "full";
-  const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent }), { signal: includeContext === "signal", includeDecisionCards }) : undefined;
+  const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent }), { signal: includeContext === "signal", lite: includeContext === "lite", includeDecisionCards }) : undefined;
   const context = bundle ? await contextFromBundle(root, bundle, input.detail, adaptiveControl) : undefined;
   const recommendedTool = adaptiveControl?.strategy === "deterministic_preflight" && adaptiveControl.deterministicActions[0]
     ? adaptiveControl.deterministicActions[0]
@@ -90,7 +89,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     flowLevel: task.flowLevel,
     nextAction: next.nextAction,
     recommendedTool,
-    blockedBy: bundle?.blockedBy ?? [],
+    blockedBy: shouldInlineBlockers(includeContext, input.detail) ? bundle?.blockedBy ?? [] : [],
     warnings: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings],
     context,
     evidenceRefs: context?.evidenceRefs,
@@ -141,6 +140,11 @@ function isWorkflowNextCacheable(includeContext: WorkflowNextInput["includeConte
   return false;
 }
 
+function shouldInlineBlockers(includeContext: WorkflowNextInput["includeContext"], detail: WorkflowNextInput["detail"]): boolean {
+  if (detail === "normal" || detail === "full") return true;
+  return includeContext !== "lite" && includeContext !== "signal";
+}
+
 function emptyContext(mode: WorkflowContextSummary["mode"], summaryText: string, evidenceRefs: string[], detail: DetailMode = "summary"): WorkflowContextSummary {
   const policy = contextBudgetPolicy(mode, detail);
   const truncated = truncateText(summaryText, policy.maxSummaryChars || summaryText.length);
@@ -156,7 +160,8 @@ async function contextFromBundle(root: string, bundle: WorkflowContextBundle, de
   const policy = contextBudgetPolicy(bundle.mode, detail);
   const evidenceRefs = evidenceRefsFor(bundle);
   const omittedItems: WorkflowOmittedArtifact[] = [];
-  const truncatedSummary = truncateText(bundle.summary, policy.maxSummaryChars || bundle.summary.length);
+  const includeInlineSummary = bundle.mode !== "signal" && bundle.mode !== "lite";
+  const truncatedSummary = includeInlineSummary ? truncateText(bundle.summary, policy.maxSummaryChars || bundle.summary.length) : { text: "", truncatedBytes: 0 };
   let truncatedBytes = truncatedSummary.truncatedBytes;
   let details: unknown;
   let detailRef: string | undefined;
@@ -190,7 +195,7 @@ async function contextFromBundle(root: string, bundle: WorkflowContextBundle, de
     omittedItems.push(omitted("context.details", "workflow_next.details", detailedContext(bundle), `${bundle.mode} mode returns evidence refs instead of full details.`));
   }
 
-  const summary = bundle.mode === "signal" ? "" : truncatedSummary.text;
+  const summary = includeInlineSummary ? truncatedSummary.text : "";
   const valueForBudget = { summary, evidenceRefs, details, detailRef };
   return {
     mode: bundle.mode,

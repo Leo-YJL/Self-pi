@@ -283,6 +283,7 @@ test("workflow_next defaults to lite context with budget metadata", async () => 
 
   const next = await workflowNext(root, {});
   assert.equal(next.context?.mode, "lite");
+  assert.equal(next.context?.summary, "");
   assert.equal(next.context?.details, undefined);
   assert.ok(next.context?.evidenceRefs?.some((ref) => ref.startsWith("prd:")));
   assert.ok(next.context?.omitted?.some((item) => item.kind === "context.details"));
@@ -304,12 +305,18 @@ test("workflow_next adaptive control emits implement subagent brief and delegate
   assert.equal(start.ok, true);
 
   const next = await workflowNext(root, { task: create.task });
+  assert.equal(next.context?.mode, "lite");
   assert.equal(next.adaptiveControl?.strategy, "subagent_brief");
   assert.equal(next.adaptiveControl?.recommendedAgent, "implement");
-  assert.equal(next.adaptiveControl?.subagentBriefs[0]?.agent, "implement");
+  assert.equal(next.adaptiveControl?.subagentBriefs.length, 0);
+  assert.equal(next.adaptiveControl?.reasons.length, 0);
+  assert.equal(next.adaptiveControl?.stopConditions.length, 0);
   assert.equal(next.adaptiveControl?.delegateRecommendedCall?.name, "workflow_delegate");
   assert.equal(next.recommendedTool?.name, "workflow_delegate");
-  assert.ok(next.adaptiveControl?.subagentBriefs[0]?.instructions.some((line) => line.includes("manifest")));
+
+  const brief = await workflowNext(root, { task: create.task, includeContext: "brief" });
+  assert.equal(brief.adaptiveControl?.subagentBriefs[0]?.agent, "implement");
+  assert.ok(brief.adaptiveControl?.subagentBriefs[0]?.instructions.some((line) => line.includes("manifest")));
 
   const delegate = await workflowDelegate(root, { task: create.task, agent: "implement", mode: "dry_run" });
   assert.equal(delegate.ok, true);
@@ -729,7 +736,7 @@ test("workflow telemetry writes schema-versioned JSONL events", async () => {
 
   const events = await readTelemetryEvents(root);
   assert.ok(events.some((event) => event.event === "workflow_run" && event.action === "create_from_grill" && event.schemaVersion === 1));
-  assert.ok(events.some((event) => event.event === "workflow_next" && event.task === create.task && typeof event.estimatedTokens === "number"));
+  assert.ok(events.some((event) => event.event === "workflow_next" && event.task === create.task && event.contextMode === "lite" && typeof event.estimatedTokens === "number"));
   assert.ok(events.some((event) => event.event === "workflow_run" && event.action === "checkpoint" && event.artifactRefs.includes(checkpointResult.artifactRef)));
   const checkpoint = JSON.parse(await readFile(join(root, checkpointResult.artifactRef!), "utf8"));
   assert.equal(checkpoint.kind, "pi-coding-workflow.checkpoint");
@@ -743,6 +750,7 @@ test("workflow_next emits telemetry budget warnings after repeated calls", async
   let next = await workflowNext(root, { task: create.task, detail: "normal" });
   for (let i = 0; i < 12; i++) next = await workflowNext(root, { task: create.task, detail: "normal" });
   assert.ok(next.warnings.some((warning) => warning.code === "workflow_next_repeated"));
+  assert.ok(next.warnings.some((warning) => warning.code === "workflow_next_signal_suggested"));
 });
 
 test("start preflight blocks missing PRD", async () => {

@@ -10,11 +10,11 @@ import type { WorkflowTaskJson } from "./task.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
 
 const execFileAsync = promisify(execFile);
-const CACHE_SCHEMA_VERSION = 2;
+const CACHE_SCHEMA_VERSION = 3;
 const MAX_CACHE_ENTRIES = 25;
 
 interface CacheFile {
-  schemaVersion: 2;
+  schemaVersion: 3;
   package: { name: "pi-coding-workflow"; version: string };
   entries: Record<string, WorkflowNextCacheEntry>;
 }

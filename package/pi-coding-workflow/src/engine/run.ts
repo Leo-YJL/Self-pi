@@ -126,7 +126,7 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
   if (action === "list_tasks") {
     const listed = await listWorkflowTasks(root, input);
     const total = listed.total;
-    return { ...ok(action, mode, false, total > 0 ? `Found ${total} matching workflow task(s); returned ${listed.tasks.length}.` : "No workflow tasks found."), tasks: listed.tasks.map(taskSummary) as any, preflight: { tasks: listed.tasks.map(taskSummary), total, limit: listed.limit, status: listed.status, includeArchived: listed.includeArchived }, nextAction: listed.tasks.length > 0 ? "select_task" : "no_task_grill" };
+    return { ...ok(action, mode, false, total > 0 ? `Found ${total} matching workflow task(s); returned ${listed.tasks.length}.` : "No workflow tasks found."), tasks: listed.tasks.map(taskSummary) as any, preflight: { total, limit: listed.limit, status: listed.status, includeArchived: listed.includeArchived }, nextAction: listed.tasks.length > 0 ? "select_task" : "no_task_grill" };
   }
 
   if (action === "record_grill_decision") {

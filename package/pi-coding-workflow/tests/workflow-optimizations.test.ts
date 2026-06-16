@@ -44,6 +44,15 @@ test("invalid explicit task ids return structured blockers instead of throwing",
   assert.equal(next.blockedBy[0]?.code, "task_not_found");
 });
 
+test("workflow_next without initialized workflow does not recommend checkpoint", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-no-workflow-"));
+  const next = await workflowNext(root, { includeContext: "lite" });
+  assert.equal(next.ok, true);
+  assert.equal(next.status, "no_task");
+  assert.equal(next.recommendedTool, undefined);
+  assert.ok(next.warnings.some((warning) => warning.code === "workflow_dir_missing"));
+});
+
 test("create task uses defaultFlowLevel and deterministic manifest actions maintain JSONL", async () => {
   const root = await mkdtemp(join(tmpdir(), "pcw-manifest-actions-"));
   await executeInitWorkspace(root, "generic");
@@ -267,11 +276,28 @@ test("workflow_next signal mode returns compact routing fields and a detail ref"
   const next = await workflowNext(root, { task: create.task, includeContext: "signal" });
   const bytes = Buffer.byteLength(JSON.stringify(next), "utf8");
   assert.equal(next.context?.mode, "signal");
+  assert.equal(next.context?.summary, "");
   assert.ok(next.detailRef?.includes(".workflow/.runtime/context/"));
+  assert.deepEqual(next.blockedBy, []);
   assert.ok(next.blockedCodes?.includes("grill_not_finalized"));
   assert.equal(next.strategy, "ask_user");
   assert.equal(next.context?.adaptiveControl, undefined);
   assert.ok(bytes < 5000, `signal output too large: ${bytes} bytes`);
+
+  const artifact = JSON.parse(await readFile(join(root, next.detailRef!), "utf8"));
+  assert.equal(artifact.kind, "pi-coding-workflow.context");
+  assert.ok(artifact.prd?.source);
+  assert.ok(artifact.manifests?.implement);
+  assert.ok(artifact.adaptiveControl?.strategy);
+  assert.ok(artifact.blockedBy?.some((blocker: any) => blocker.code === "grill_not_finalized"));
+
+  const lite = await workflowNext(root, { task: create.task, includeContext: "lite" });
+  assert.equal(lite.context?.summary, "");
+  assert.deepEqual(lite.blockedBy, []);
+  assert.ok(lite.blockedCodes?.includes("grill_not_finalized"));
+
+  const detailedLite = await workflowNext(root, { task: create.task, includeContext: "lite", detail: "normal" });
+  assert.ok(detailedLite.blockedBy.some((blocker) => blocker.code === "grill_not_finalized"));
 });
 
 test("sync_manifest_from_diff dry-run reports execute requirements and validates entries", async () => {
@@ -301,6 +327,7 @@ test("list_tasks supports status filters and default limits", async () => {
   assert.equal(listed.ok, true);
   assert.equal(listed.tasks?.length, 12);
   assert.equal((listed.preflight as any).total, 15);
+  assert.equal((listed.preflight as any).tasks, undefined);
 
   const completedTask = await readTask(root, listed.tasks![0].id);
   completedTask.status = "completed";

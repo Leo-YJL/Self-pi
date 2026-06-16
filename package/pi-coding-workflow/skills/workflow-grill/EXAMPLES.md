@@ -6,11 +6,11 @@ These examples are illustrative. Current tool schemas and workflow engine behavi
 
 ```json
 {
-  "includeContext": "lite"
+  "includeContext": "signal"
 }
 ```
 
-Use with `workflow_next` before creating/selecting a task, at stage boundaries, and when blocker/adaptive feedback is needed. Do not call it after every PRD child update.
+Use with `workflow_next` before creating/selecting a task, at stage boundaries, and when blocker/adaptive feedback is needed. Request `lite`/`task` only when signal refs are insufficient. Do not call it after every PRD child update.
 
 ## Create a PRD-first grill task
 
@@ -183,7 +183,7 @@ Then execute:
 }
 ```
 
-After finalization, run `workflow_next({ "includeContext": "lite" })` and report the next recommended workflow step.
+After finalization, run `workflow_next({ "includeContext": "signal" })` and report the next recommended workflow step.
 
 ## Common finalize blockers
 

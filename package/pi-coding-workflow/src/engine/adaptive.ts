@@ -88,10 +88,10 @@ export function buildAdaptiveControl(input: AdaptiveInput): WorkflowAdaptiveCont
   };
 }
 
-export function compactAdaptiveControl(control: WorkflowAdaptiveControl, options: { signal?: boolean; includeDecisionCards?: boolean } = {}): WorkflowAdaptiveControl {
+export function compactAdaptiveControl(control: WorkflowAdaptiveControl, options: { signal?: boolean; lite?: boolean; includeDecisionCards?: boolean } = {}): WorkflowAdaptiveControl {
   const decisionCardHints = options.includeDecisionCards ? control.decisionCardHints?.slice(0, 3) : undefined;
   const decisionCardIds = control.decisionCardHints?.map((card) => card.decisionId).slice(0, 6) ?? [];
-  if (options.signal) {
+  if (options.signal || options.lite) {
     return {
       strategy: control.strategy,
       recommendedAgent: control.recommendedAgent,
