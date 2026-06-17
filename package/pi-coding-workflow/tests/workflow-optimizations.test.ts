@@ -337,3 +337,48 @@ test("list_tasks supports status filters and default limits", async () => {
   assert.equal(completed.tasks?.length, 1);
   assert.equal(completed.tasks?.[0].status, "completed");
 });
+
+test("workflow_next signal mode reuses the same detailRef artifact when content is unchanged", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-signal-dedup-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Signal Dedup", level: "standard", slug: "signal-dedup" });
+
+  const first = await workflowNext(root, { task: create.task, includeContext: "signal" });
+  assert.ok(first.detailRef);
+  // Deterministic id includes task + prd/manifest hashes; same payload reuses the same file.
+  assert.match(first.detailRef!, /\/signal-/);
+  const firstStat = await (await import("node:fs/promises")).stat(join(root, first.detailRef!));
+
+  // Wait a tick to ensure mtime would differ if a rewrite happened.
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const second = await workflowNext(root, { task: create.task, includeContext: "signal" });
+  assert.equal(second.detailRef, first.detailRef);
+  const secondStat = await (await import("node:fs/promises")).stat(join(root, second.detailRef!));
+  assert.equal(secondStat.mtimeMs, firstStat.mtimeMs, "artifact should not be rewritten when payload is unchanged");
+
+  // Mutating the PRD must produce a different deterministic id (different hashes).
+  const prdPath = join(root, ".workflow/tasks", create.task!, "prd.md");
+  const prdBefore = await readFile(prdPath, "utf8");
+  await writeFile(prdPath, prdBefore + "\n\n<!-- mutate -->\n", "utf8");
+  const third = await workflowNext(root, { task: create.task, includeContext: "signal" });
+  assert.notEqual(third.detailRef, first.detailRef, "different content must produce a different artifact ref");
+});
+
+test("telemetry signal_suggested warning fires after a few lite calls without any signal call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-signal-suggested-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Signal Suggested", level: "standard", slug: "signal-suggested" });
+  const taskId = create.task!;
+
+  // workflow_next reads telemetry BEFORE writing the current call's event, so the 6th
+  // call is the first to observe >= 5 prior lite events. detail=normal bypasses the
+  // per-call cache so the warning is re-evaluated on every call.
+  for (let i = 0; i < 5; i++) await workflowNext(root, { task: taskId, includeContext: "lite", detail: "normal" });
+  const observed = await workflowNext(root, { task: taskId, includeContext: "lite", detail: "normal" });
+  assert.ok(observed.warnings.some((warning) => warning.code === "workflow_next_signal_suggested"), "expected workflow_next_signal_suggested after >= 5 prior lite calls without any signal call");
+
+  // After a single signal call, the suggestion goes away (signalCount > 0 disables the rule).
+  await workflowNext(root, { task: taskId, includeContext: "signal", detail: "normal" });
+  const afterSignal = await workflowNext(root, { task: taskId, includeContext: "lite", detail: "normal" });
+  assert.equal(afterSignal.warnings.some((warning) => warning.code === "workflow_next_signal_suggested"), false, "signal call should clear the suggestion");
+});

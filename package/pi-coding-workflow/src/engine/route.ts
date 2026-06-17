@@ -167,7 +167,7 @@ async function contextFromBundle(root: string, bundle: WorkflowContextBundle, de
   let detailRef: string | undefined;
 
   if (bundle.mode === "signal") {
-    const artifact = await writeJsonArtifact(root, "context", {
+    const payload = {
       kind: "pi-coding-workflow.context",
       schemaVersion: 1,
       mode: bundle.mode,
@@ -182,7 +182,13 @@ async function contextFromBundle(root: string, bundle: WorkflowContextBundle, de
       warnings: bundle.warnings,
       adaptiveControl,
       createdAt: new Date().toISOString(),
-    });
+    };
+    // Deterministic id keyed on task + prd/manifest hashes: identical content reuses
+    // the same artifact file instead of writing a near-duplicate on every signal call.
+    const prdHash = bundle.prd.source.hash ?? "missing";
+    const implHash = bundle.manifests.implement.hash ?? "missing";
+    const checkHash = bundle.manifests.check.hash ?? "missing";
+    const artifact = await writeJsonArtifact(root, "context", payload, `signal-${bundle.task.id}-${prdHash}-${implHash}-${checkHash}`);
     detailRef = artifact.artifactRef;
   } else if (policy.includeDetails) {
     details = detailedContext(bundle);

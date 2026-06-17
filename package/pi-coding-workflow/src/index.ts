@@ -160,7 +160,7 @@ export default function (pi: ExtensionAPI) {
     label: "Workflow Run",
     description: "Controlled workflow stage actuator. Dry-run by default; supports action=batch with actions[] for deterministic transactions.",
     promptSnippet: "Controlled workflow stage actuator for create/start/checkpoint/finish/batch actions.",
-    promptGuidelines: ["Use workflow_run after workflow_next recommends an action; safe execute actions run gates first and return blockers without mutating when they fail, use dry_run for previews or risky operations, and use action=batch to combine deterministic steps."],
+    promptGuidelines: ["Use workflow_run after workflow_next recommends an action.", "Prefer mode=execute directly for gate-checked state actions (create_from_grill, init_manifests, upsert_manifest_entry, remove_manifest_entry, finalize_grill, start_checked, finish_run, archive, reopen): they run preflight first and return blockers without mutating when they fail, so a separate dry_run round-trip is usually unnecessary.", "Use mode=dry_run only to preview PRD writes (record_round_and_update_prd, update_prd_section), to review a batch plan before committing, or when explicitly uncertain.", "Use action=batch to combine deterministic steps into one transaction."],
     parameters: Type.Object({
       action: StringEnum(ACTION_VALUES),
       task: Type.Optional(Type.String()),
