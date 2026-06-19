@@ -8,7 +8,7 @@ import { createTask, findActiveTask, listArchivedTasks, listRootTasks, readTask,
 import { checkpoint } from "./checkpoint.ts";
 import { validateTask } from "./validate.ts";
 import { estimateTokens, RUN_RESULT_TARGET_TOKENS } from "./contextBudget.ts";
-import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
+import { writeJsonArtifact, stableShortHash } from "../artifacts/writeToolResult.ts";
 import { writeWorkflowTelemetry } from "./telemetry.ts";
 import { appendGrillDecision, finalizeGrillState, refreshGrillPrdCoverage, validateGrillFinalization } from "./grill.ts";
 import { appendPrdDecisionLog, readPrdKernel, updatePrdSection, type PrdSectionKey } from "./prd.ts";
@@ -715,6 +715,29 @@ async function applyRunDetail(root: string, output: WorkflowRunOutput, input: Wo
   const detail = input.detail ?? "lite";
   if (detail === "full" || output.preflight === undefined) return output;
 
+  // Trivial preflight payloads (e.g. list_tasks pagination metadata) carry no
+  // diagnostic value beyond the inline summary — skip the artifact write entirely
+  // to avoid `.workflow/.runtime/preflight/` accumulating throwaway files.
+  if (isTrivialPreflight(output.preflight)) {
+    return {
+      ...output,
+      preflight: detail === "summary" ? summarizePreflight(output.preflight) : output.preflight,
+    };
+  }
+
+  // Deterministic id keyed on the action + task + preflight payload (no `createdAt`)
+  // so identical preflight runs reuse a single artifact file. `writeJsonArtifact`
+  // skips rewriting when an explicit id resolves to an existing file.
+  const idMaterial = {
+    action: output.action,
+    task: output.task,
+    status: output.status,
+    stage: output.stage,
+    ok: output.ok,
+    blockedBy: output.blockedBy,
+    preflight: output.preflight,
+  };
+  const artifactId = `preflight-${output.task ?? "no-task"}-${output.action}-${stableShortHash(idMaterial)}`;
   const artifact = await writeJsonArtifact(root, "preflight", {
     kind: "pi-coding-workflow.preflight",
     schemaVersion: 1,
@@ -729,7 +752,7 @@ async function applyRunDetail(root: string, output: WorkflowRunOutput, input: Wo
     warnings: output.warnings,
     preflight: output.preflight,
     createdAt: new Date().toISOString(),
-  });
+  }, artifactId);
   const existingArtifacts = output.artifacts ?? (output.artifactRef ? [{ kind: output.action === "checkpoint" ? "checkpoint" : "artifact", ref: output.artifactRef, summary: output.summary }] : []);
   const preflightArtifact = { kind: "preflight", ref: artifact.artifactRef, summary: `${output.action} preflight details` };
 
@@ -739,6 +762,27 @@ async function applyRunDetail(root: string, output: WorkflowRunOutput, input: Wo
     preflightRef: artifact.artifactRef,
     artifacts: [...existingArtifacts, preflightArtifact],
   };
+}
+
+/**
+ * A preflight payload is "trivial" when it carries no nested validation detail —
+ * just scalar metadata or empty arrays. Examples: `list_tasks` pagination info,
+ * `sync_manifest_from_diff` with zero candidates. Such payloads are not worth
+ * writing to disk; the inline summary already covers them.
+ */
+function isTrivialPreflight(preflight: unknown): boolean {
+  if (!preflight || typeof preflight !== "object") return true;
+  const value = preflight as Record<string, unknown>;
+  for (const key of Object.keys(value)) {
+    const v = value[key];
+    if (v === null || v === undefined) continue;
+    if (Array.isArray(v)) {
+      if (v.length > 0) return false;
+      continue;
+    }
+    if (typeof v === "object") return false;
+  }
+  return true;
 }
 
 function summarizePreflight(preflight: unknown): unknown {

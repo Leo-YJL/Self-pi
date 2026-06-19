@@ -10,6 +10,7 @@ import { writeJsonArtifact } from "../artifacts/writeToolResult.ts";
 import { readWorkflowTelemetrySummary, writeWorkflowTelemetry } from "./telemetry.ts";
 import { buildAdaptiveControl, compactAdaptiveControl } from "./adaptive.ts";
 import { isGrillFinalized } from "./grill.ts";
+import { readGitPorcelain } from "./gitPorcelain.ts";
 
 export async function workflowNext(root: string, input: WorkflowNextInput = {}): Promise<WorkflowNextOutput> {
   const startedAt = Date.now();
@@ -65,15 +66,20 @@ export async function workflowNext(root: string, input: WorkflowNextInput = {}):
 async function routeForTask(root: string, profile: string, task: WorkflowTaskJson, input: WorkflowNextInput): Promise<WorkflowNextOutput> {
   const includeContext = input.includeContext ?? "lite";
   const next = nextActionForTask(task, input.agent);
+  // Fetch `git status --porcelain` once per call — both the cache key fingerprint
+  // and the workspace summary inside the context bundle need it. Without this share
+  // a cache-miss path would spawn `git` twice (cost ~30–80ms on Windows).
+  const needsPorcelain = isWorkflowNextCacheable(includeContext, input.detail) || includeContext !== "none";
+  const porcelain = needsPorcelain ? await readGitPorcelain(root) : undefined;
   const workflowCacheKey = isWorkflowNextCacheable(includeContext, input.detail)
-    ? await computeWorkflowNextCacheKey(root, task, { profile, includeContext, detail: input.detail, agent: input.agent })
+    ? await computeWorkflowNextCacheKey(root, task, { profile, includeContext, detail: input.detail, agent: input.agent }, porcelain)
     : undefined;
   if (workflowCacheKey) {
     const cached = await readWorkflowNextCache(root, workflowCacheKey);
     if (cached) return cached;
   }
 
-  const bundle = includeContext === "none" ? null : await buildContextBundle(root, task, { mode: includeContext, agent: input.agent, profile, detail: input.detail });
+  const bundle = includeContext === "none" ? null : await buildContextBundle(root, task, { mode: includeContext, agent: input.agent, profile, detail: input.detail, porcelain });
   const telemetrySummary = await readWorkflowTelemetrySummary(root, task.id);
   const includeDecisionCards = input.detail === "normal" || input.detail === "full";
   const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent }), { signal: includeContext === "signal", lite: includeContext === "lite", includeDecisionCards }) : undefined;
@@ -92,9 +98,10 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     blockedBy: shouldInlineBlockers(includeContext, input.detail) ? bundle?.blockedBy ?? [] : [],
     warnings: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings],
     context,
-    evidenceRefs: context?.evidenceRefs,
-    omitted: context?.omitted,
-    tokenBudget: context?.tokenBudget,
+    // evidenceRefs / omitted / tokenBudget are canonically embedded inside `context.*`.
+    // Top-level mirrors used to duplicate the same payload (~100 tokens / call); they
+    // are no longer populated. `finalizeNext` and downstream consumers fall back to
+    // `context.*`. Types remain optional for backward compatibility with old caches.
     adaptiveControl,
     blockedCodes: bundle?.blockedBy.map((blocker) => blocker.code) ?? [],
     warningCodes: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings].map((warning) => warning.code),
@@ -314,9 +321,9 @@ function finalizeNext(output: WorkflowNextOutput, startedAt: number): WorkflowNe
   };
   return {
     ...output,
-    evidenceRefs: output.evidenceRefs ?? output.context?.evidenceRefs,
-    omitted: output.omitted ?? output.context?.omitted,
-    tokenBudget: output.tokenBudget ?? output.context?.tokenBudget,
+    // Top-level evidenceRefs/omitted/tokenBudget were deduplicated in v0.4.0; consumers
+    // read these from `output.context.*`. We only re-attach `adaptiveControl` because it
+    // is computed at the route level (not embedded in context for non-signal modes).
     adaptiveControl: output.adaptiveControl ?? output.context?.adaptiveControl,
     meta,
   };

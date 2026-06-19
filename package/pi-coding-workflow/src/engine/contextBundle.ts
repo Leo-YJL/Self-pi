@@ -4,6 +4,7 @@ import { manifestFiles, manifestIssuesToWarnings, readTaskManifests, type Workfl
 import { readWorkspaceSummary, type WorkspaceSummary } from "./workspace.ts";
 import type { WorkflowTaskJson } from "./task.ts";
 import { computeStartBlockers } from "./startGate.ts";
+import type { GitPorcelainResult } from "./gitPorcelain.ts";
 
 export interface WorkflowContextBundle {
   mode: ContextMode;
@@ -22,13 +23,13 @@ export interface WorkflowContextBundle {
 export async function buildContextBundle(
   root: string,
   task: WorkflowTaskJson,
-  options: { mode?: ContextMode; agent?: WorkflowAgent; profile?: string; detail?: DetailMode } = {},
+  options: { mode?: ContextMode; agent?: WorkflowAgent; profile?: string; detail?: DetailMode; porcelain?: GitPorcelainResult } = {},
 ): Promise<WorkflowContextBundle> {
   const mode = options.mode ?? "brief";
   const prdMode = prdModeForContext(mode, options.detail);
   const prd = await readPrdKernel(root, task, prdMode);
   const manifests = await readTaskManifests(root, task);
-  const workspace = await readWorkspaceSummary(root, { inScopeFiles: manifestFiles(manifests), taskId: task.id });
+  const workspace = await readWorkspaceSummary(root, { inScopeFiles: manifestFiles(manifests), taskId: task.id, porcelain: options.porcelain });
   const blockedBy = contextBlockers(task, prd, manifests, options.agent);
   const warnings = contextWarnings(prd, manifests, workspace);
   const recommendedNext = recommendedNextFor(task, options.agent);

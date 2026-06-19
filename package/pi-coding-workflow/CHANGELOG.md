@@ -9,6 +9,9 @@
 
 ### Changed
 
+- `workflow_next` no longer mirrors `evidenceRefs`, `omitted`, and `tokenBudget` at the top level — these stay only inside `context.*` (their canonical location). Removes ~100 tokens / call duplication; measured ~20% reduction on every `workflow_next` payload (~500 tokens / lifecycle in standard scenarios). Top-level fields remain optional in the schema for backward compatibility but are no longer populated.
+- `workflow_next` cache-miss path now spawns `git status --porcelain` exactly once per call. Both the cache-key fingerprint and the workspace summary inside the context bundle reuse a shared `readGitPorcelain` result. Saves one `git` process spawn (~30–80 ms on Windows) per cache miss.
+- `workflow_run` preflight artifact id is now derived from the action + task + preflight payload (no `createdAt` in the id material). Identical preflight reruns reuse the same artifact file instead of writing a near-duplicate. Trivial preflight payloads (e.g. `list_tasks` pagination metadata, `sync_manifest_from_diff` with no candidates) are no longer written to disk at all — the inline summary already covers them.
 - `workflow_next` signal-mode `detailRef` artifacts use a deterministic id derived from task + PRD/manifest hashes, and `writeJsonArtifact` skips the rewrite when an artifact with the same explicit id already exists. Identical signal payloads now reuse the same file instead of accumulating near-duplicate runtime artifacts.
 - Telemetry warning `workflow_next_signal_suggested` now fires after 5 lite-only `workflow_next` calls (down from 12) so the suggestion to switch to `includeContext=signal` surfaces earlier.
 - `workflow-finish` skill clarifies the `reopen` PRD dead-zone: requirements changes should be a new task rather than PRD edits after `reopen` (final confirmation would be invalidated and `finalize_grill` requires the `planning` state).
@@ -18,6 +21,8 @@
 - Added auto-mode coverage: passing-gate execute, failing-gate blocker, non-whitelisted fallback to `dry_run`, and per-child normalization inside `batch`.
 - Added signal artifact dedup test (same payload reuses ref + mtime; mutated PRD produces new ref).
 - Added `workflow_next_signal_suggested` threshold test (fires at 5 lite calls, clears after one signal call).
+- Added top-level field dedup test (`workflow_next` no longer mirrors `evidenceRefs / omitted / tokenBudget` at the root).
+- Added preflight dedup tests (identical `start_checked` reruns reuse the artifact mtime; `list_tasks` does not produce a preflight file).
 
 ## 0.3.1 - 2026-06-16 (lite slim, included in 0.4.0)
 

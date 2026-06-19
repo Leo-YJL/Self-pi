@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { normalizeSlash } from "../safety/pathPolicy.ts";
+import { readGitPorcelain, type GitPorcelainResult } from "./gitPorcelain.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,33 +31,38 @@ export interface GitDiffCheckResult {
   summary: string;
 }
 
-export async function readWorkspaceSummary(root: string, options: { inScopeFiles?: string[]; taskId?: string } = {}): Promise<WorkspaceSummary> {
+export async function readWorkspaceSummary(
+  root: string,
+  options: { inScopeFiles?: string[]; taskId?: string; porcelain?: GitPorcelainResult } = {},
+): Promise<WorkspaceSummary> {
   const scopeFiles = new Set((options.inScopeFiles ?? []).map((file) => normalizeSlash(file)));
   const taskPrefix = options.taskId ? `.workflow/tasks/${options.taskId}/` : "";
-  try {
-    const result = await execFileAsync("git", ["status", "--porcelain"], { cwd: root, timeout: 10_000 });
-    const dirtyFiles = result.stdout
-      .split(/\r?\n/)
-      .map((line) => parsePorcelainLine(line, scopeFiles, taskPrefix))
-      .filter((file): file is WorkspaceDirtyFile => file !== null);
-    const inScopeCount = dirtyFiles.filter((file) => file.scope === "in_scope").length;
-    const taskFileCount = dirtyFiles.filter((file) => file.scope === "task").length;
-    const unrelatedCount = dirtyFiles.filter((file) => file.scope === "unrelated").length;
-    return {
-      isGit: true,
-      dirtyCount: dirtyFiles.length,
-      inScopeCount,
-      taskFileCount,
-      unrelatedCount,
-      dirtyFiles,
-      summary: dirtyFiles.length === 0 ? "workspace clean" : `workspace dirty: ${dirtyFiles.length} files (${inScopeCount} in-scope, ${taskFileCount} task, ${unrelatedCount} unrelated)`,
-    };
-  } catch (error: any) {
-    if (isNotGitRepository(error)) {
-      return { isGit: false, dirtyCount: 0, inScopeCount: 0, taskFileCount: 0, unrelatedCount: 0, dirtyFiles: [], skippedReason: "not_git_repository", summary: "git status skipped: not a git repository" };
-    }
-    return { isGit: false, dirtyCount: 0, inScopeCount: 0, taskFileCount: 0, unrelatedCount: 0, dirtyFiles: [], skippedReason: error.message, summary: `git status skipped: ${error.message}` };
+  // Reuse a pre-fetched porcelain result when the caller already ran it (e.g. the
+  // workflow_next route that also needs it for the cache key) to avoid a second
+  // `git status --porcelain` spawn on the same call.
+  const porcelain = options.porcelain ?? await readGitPorcelain(root);
+  if (porcelain.kind === "not_git") {
+    return { isGit: false, dirtyCount: 0, inScopeCount: 0, taskFileCount: 0, unrelatedCount: 0, dirtyFiles: [], skippedReason: "not_git_repository", summary: "git status skipped: not a git repository" };
   }
+  if (porcelain.kind === "error") {
+    return { isGit: false, dirtyCount: 0, inScopeCount: 0, taskFileCount: 0, unrelatedCount: 0, dirtyFiles: [], skippedReason: porcelain.errorText, summary: `git status skipped: ${porcelain.errorText ?? "unknown"}` };
+  }
+  const dirtyFiles = porcelain.stdout
+    .split(/\r?\n/)
+    .map((line) => parsePorcelainLine(line, scopeFiles, taskPrefix))
+    .filter((file): file is WorkspaceDirtyFile => file !== null);
+  const inScopeCount = dirtyFiles.filter((file) => file.scope === "in_scope").length;
+  const taskFileCount = dirtyFiles.filter((file) => file.scope === "task").length;
+  const unrelatedCount = dirtyFiles.filter((file) => file.scope === "unrelated").length;
+  return {
+    isGit: true,
+    dirtyCount: dirtyFiles.length,
+    inScopeCount,
+    taskFileCount,
+    unrelatedCount,
+    dirtyFiles,
+    summary: dirtyFiles.length === 0 ? "workspace clean" : `workspace dirty: ${dirtyFiles.length} files (${inScopeCount} in-scope, ${taskFileCount} task, ${unrelatedCount} unrelated)`,
+  };
 }
 
 export async function runGitDiffCheck(root: string): Promise<GitDiffCheckResult> {

@@ -489,3 +489,53 @@ test("workflow_run mode=auto inside batch resolves per child action", async () =
   assert.equal(result.results?.length, 2);
   assert.ok(result.results?.every((child) => child.mode === "execute"), "each whitelisted auto child should be normalized to execute");
 });
+
+test("workflow_next does not duplicate evidenceRefs/omitted/tokenBudget at the top level", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-dedup-top-fields-"));
+  await executeInitWorkspace(root, "generic");
+  const taskId = await prepareReadyToStartTask(root, "dedup-fields");
+
+  // lite mode is the canonical path that historically mirrored these fields. After the
+  // dedup the canonical location is `context.*`; top-level mirrors must be absent so we
+  // do not pay ~100 tokens per call serializing the same payload twice.
+  const next = await workflowNext(root, { task: taskId, includeContext: "lite" });
+  assert.equal(next.ok, true);
+  assert.ok(next.context, "lite mode must still build a context block");
+  assert.ok(next.context.evidenceRefs && next.context.evidenceRefs.length > 0, "context.evidenceRefs is the canonical location");
+  assert.equal((next as any).evidenceRefs, undefined, "top-level evidenceRefs should not be populated");
+  assert.equal((next as any).omitted, undefined, "top-level omitted should not be populated");
+  assert.equal((next as any).tokenBudget, undefined, "top-level tokenBudget should not be populated");
+});
+
+test("workflow_run dry_run produces a deterministic preflight artifact id (no rewrite on identical reruns)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-preflight-dedup-"));
+  await executeInitWorkspace(root, "generic");
+  const taskId = await prepareReadyToStartTask(root, "preflight-dedup");
+
+  const first = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: taskId });
+  assert.equal(first.ok, true);
+  const ref1 = first.preflightRef;
+  assert.ok(ref1 && ref1.startsWith(".workflow/.runtime/preflight/"), "preflightRef should point to a runtime artifact");
+  const abs1 = join(root, ref1!);
+  assert.ok(existsSync(abs1), "preflight artifact file should exist");
+  const stat1 = (await import("node:fs/promises")).stat;
+  const mtime1 = (await stat1(abs1)).mtimeMs;
+
+  // Same task, same workspace state, same action → identical preflight payload → same id.
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const second = await workflowRun(root, { action: "start_checked", mode: "dry_run", task: taskId });
+  assert.equal(second.preflightRef, ref1, "preflight artifact id must be deterministic across identical calls");
+  const mtime2 = (await stat1(abs1)).mtimeMs;
+  assert.equal(mtime2, mtime1, "writeJsonArtifact should skip rewriting an existing preflight file");
+});
+
+test("workflow_run dry_run skips preflight artifact for trivial payloads (list_tasks pagination)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-preflight-skip-"));
+  await executeInitWorkspace(root, "generic");
+
+  const result = await workflowRun(root, { action: "list_tasks", mode: "dry_run" });
+  assert.equal(result.ok, true);
+  assert.equal(result.preflightRef, undefined, "trivial preflight payloads should not produce a preflightRef");
+  assert.ok(!(result.artifacts ?? []).some((artifact) => artifact.kind === "preflight"), "no preflight artifact should be attached for list_tasks");
+  assert.ok(!existsSync(join(root, ".workflow/.runtime/preflight")), "preflight directory should not be created for trivial payloads");
+});

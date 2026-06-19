@@ -2,14 +2,12 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { DetailMode, WorkflowAgent, WorkflowNextOutput } from "../types.ts";
 import { PACKAGE_VERSION } from "../version.ts";
 import type { WorkflowTaskJson } from "./task.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
+import { readGitPorcelain, type GitPorcelainResult } from "./gitPorcelain.ts";
 
-const execFileAsync = promisify(execFile);
 const CACHE_SCHEMA_VERSION = 3;
 const MAX_CACHE_ENTRIES = 25;
 
@@ -34,7 +32,12 @@ export interface WorkflowNextCacheKeyInput {
   agent?: WorkflowAgent;
 }
 
-export async function computeWorkflowNextCacheKey(root: string, task: WorkflowTaskJson, input: WorkflowNextCacheKeyInput): Promise<string> {
+export async function computeWorkflowNextCacheKey(
+  root: string,
+  task: WorkflowTaskJson,
+  input: WorkflowNextCacheKeyInput,
+  porcelain?: GitPorcelainResult,
+): Promise<string> {
   const material = {
     schemaVersion: CACHE_SCHEMA_VERSION,
     packageVersion: PACKAGE_VERSION,
@@ -53,7 +56,7 @@ export async function computeWorkflowNextCacheKey(root: string, task: WorkflowTa
       check: await fileFingerprint(root, `.workflow/tasks/${task.id}/check.jsonl`),
       config: await fileFingerprint(root, ".workflow/config.json"),
     },
-    workspace: await workspaceFingerprint(root),
+    workspace: workspaceFingerprintFromPorcelain(porcelain ?? await readGitPorcelain(root)),
   };
   return createHash("sha256").update(JSON.stringify(material)).digest("hex");
 }
@@ -112,16 +115,11 @@ async function fileFingerprint(root: string, relPath: string): Promise<{ exists:
   return { exists: true, path: relPath, size: s.size, mtimeMs: Math.trunc(s.mtimeMs) };
 }
 
-async function workspaceFingerprint(root: string): Promise<{ kind: "git" | "not_git" | "error"; hash: string; dirtyCount?: number }> {
-  try {
-    const result = await execFileAsync("git", ["status", "--porcelain"], { cwd: root, timeout: 10_000 });
-    const lines = result.stdout.split(/\r?\n/).filter(Boolean).filter((line) => !line.includes(".workflow/.runtime/"));
-    return { kind: "git", hash: createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16), dirtyCount: lines.length };
-  } catch (error: any) {
-    const text = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}\n${error?.message ?? ""}`;
-    if (/not a git repository/i.test(text)) return { kind: "not_git", hash: "not_git" };
-    return { kind: "error", hash: createHash("sha256").update(text).digest("hex").slice(0, 16) };
-  }
+function workspaceFingerprintFromPorcelain(porcelain: GitPorcelainResult): { kind: "git" | "not_git" | "error"; hash: string; dirtyCount?: number } {
+  if (porcelain.kind === "not_git") return { kind: "not_git", hash: "not_git" };
+  if (porcelain.kind === "error") return { kind: "error", hash: createHash("sha256").update(porcelain.errorText ?? "").digest("hex").slice(0, 16) };
+  const lines = porcelain.stdout.split(/\r?\n/).filter(Boolean).filter((line) => !line.includes(".workflow/.runtime/"));
+  return { kind: "git", hash: createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16), dirtyCount: lines.length };
 }
 
 async function readCacheFile(root: string): Promise<CacheFile> {
