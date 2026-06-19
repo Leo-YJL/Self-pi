@@ -36,7 +36,7 @@ By the end of Stage 1 grill:
 2. If `.workflow/config.json` is missing, stop and tell the user to initialize workflow first (`/workflow-init --execute`, then `/workflow-init-spec --execute --plan <plan-id>` if needed). Do not create ad-hoc task files by hand.
 3. If `workflow_next` returns `adaptiveControl.strategy: "subagent_brief"`, prefer the recommended `workflow_delegate` dry-run/execute path for bounded research before asking questions that repository/spec inspection can answer.
 4. If a planning/grill task already exists and appears to match the request, continue it. If it might be unrelated, ask before creating a duplicate.
-5. If no suitable task exists, create one with `workflow_run action=create_from_grill`: dry-run first, then execute once title is clear. If flow level is omitted, the workflow config default is used.
+5. If no suitable task exists, create one with `workflow_run action=create_from_grill mode=auto`: the engine validates inputs and creates the task in one call. If flow level is omitted, the workflow config default is used.
 
 Prefer `workflow_next` for read-only routing and `workflow_run` for controlled mutations. Do not use deprecated prompt wrappers or legacy command aliases.
 
@@ -109,9 +109,8 @@ Final confirmation happens only after the latest PRD has been written and review
 2. Ask a final Decision Card with only confirmation choices: `Confirm PRD` or `Revise PRD`.
 3. If the user chooses revise, update the PRD and repeat final confirmation.
 4. If the user confirms, record final confirmation with `/workflow-prd-confirm --task <task-id> --message "<user confirmation>" --execute`.
-5. Run `workflow_run action=finalize_grill mode=dry_run userConfirmed=true decisionSource=ask_user_question`.
-6. If dry-run passes, run the same `finalize_grill` in `execute` mode.
-7. Run `workflow_next({ "includeContext": "signal" })` and report the next workflow step.
+5. Run `workflow_run action=finalize_grill mode=auto userConfirmed=true decisionSource=ask_user_question`. The engine runs full grill validation first and either commits or returns blockers without mutating, so a separate dry_run is unnecessary.
+6. Run `workflow_next({ "includeContext": "signal" })` and report the next workflow step.
 
 Do not include `stage1-final-confirm`, `final-confirmation`, or `prd-confirm` in the same `ask_user_question` call as business decisions. Do not append final confirmation decision IDs into the business `## Grill Decision Log`.
 

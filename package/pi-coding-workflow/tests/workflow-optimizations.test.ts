@@ -26,6 +26,34 @@ function taskStub(): WorkflowTaskJson {
   return { id: "t", title: "t", status: "planning", stage: "grill", flowLevel: "standard", createdAt: now, updatedAt: now };
 }
 
+// Drive a fresh simple task through the minimum grill+manifest flow until start_checked
+// preflight passes. Used by mode=auto tests to verify the execute-after-gate path.
+async function prepareReadyToStartTask(root: string, slug: string): Promise<string> {
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: `Ready ${slug}`, level: "simple", slug });
+  const taskId = create.task!;
+  await mkdir(join(root, "src"), { recursive: true });
+  await mkdir(join(root, "tests"), { recursive: true });
+  await writeFile(join(root, "src/auto.ts"), "export const ready = true;\n", "utf8");
+  await writeFile(join(root, "tests/auto.test.ts"), "import '../src/auto.ts';\n", "utf8");
+  await workflowRun(root, { action: "record_round_and_update_prd", mode: "execute", task: taskId, roundId: "round-1-scope", roundKind: "scope", decisions: [{ decisionId: "ready.scope", decisionSource: "ask_user_question", decisionSeverity: "blocking", decisionSummary: "Scope locked.", persistTo: "prd" }], prdUpdates: [
+    { prdSection: "executionContract", prdContent: "- Flow Level: simple\n- Outcome: ready." },
+    { prdSection: "goal", prdContent: "Ready to start." },
+    { prdSection: "requirements", prdContent: "- R1: ready=true." },
+    { prdSection: "acceptanceCriteria", prdContent: "- [x] ready." },
+    { prdSection: "validationPlan", prdContent: "- [x] npm test" },
+    { prdSection: "definitionOfDone", prdContent: "- [x] done." },
+    { prdSection: "outOfScope", prdContent: "- nothing." },
+    { prdSection: "openQuestions", prdContent: "None." },
+  ] });
+  await workflowRun(root, { action: "init_manifests", mode: "execute", task: taskId });
+  await workflowRun(root, { action: "upsert_manifest_entry", mode: "execute", task: taskId, manifest: "implement", file: "src/auto.ts", reason: "auto-test impl" });
+  await workflowRun(root, { action: "upsert_manifest_entry", mode: "execute", task: taskId, manifest: "check", file: "tests/auto.test.ts", reason: "auto-test check" });
+  const { confirmPrdFinal } = await import("../src/engine/prdConfirm.ts");
+  await confirmPrdFinal(root, { task: taskId, mode: "execute", message: "Confirmed for auto-mode test." });
+  await workflowRun(root, { action: "finalize_grill", mode: "execute", task: taskId, userConfirmed: true, decisionSource: "ask_user_question", notes: "Confirmed for auto-mode test." });
+  return taskId;
+}
+
 test("invalid explicit task ids return structured blockers instead of throwing", async () => {
   const root = await mkdtemp(join(tmpdir(), "pcw-invalid-task-"));
   await executeInitWorkspace(root, "generic");
@@ -381,4 +409,83 @@ test("telemetry signal_suggested warning fires after a few lite calls without an
   await workflowNext(root, { task: taskId, includeContext: "signal", detail: "normal" });
   const afterSignal = await workflowNext(root, { task: taskId, includeContext: "lite", detail: "normal" });
   assert.equal(afterSignal.warnings.some((warning) => warning.code === "workflow_next_signal_suggested"), false, "signal call should clear the suggestion");
+});
+
+test("workflow_run mode=auto on a gate-checked action runs preflight then executes when gates pass", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-auto-pass-"));
+  await executeInitWorkspace(root, "generic");
+
+  // create_from_grill is in the auto whitelist; auto must mutate just like execute would.
+  const created = await workflowRun(root, { action: "create_from_grill", mode: "auto", title: "Auto Pass", level: "simple", slug: "auto-pass" });
+  assert.equal(created.ok, true);
+  assert.equal(created.mutated, true, "auto on whitelisted create_from_grill should mutate");
+  assert.equal(created.mode, "execute", "output mode should reflect normalized execute path");
+  assert.equal(created.status, "planning");
+  assert.ok(existsSync(join(root, ".workflow/tasks", created.task!, "task.json")));
+
+  // Setup a fully ready task to exercise start_checked auto on a passing gate.
+  const ready = await prepareReadyToStartTask(root, "auto-start");
+
+  const started = await workflowRun(root, { action: "start_checked", mode: "auto", task: ready });
+  assert.equal(started.ok, true);
+  assert.equal(started.mutated, true, "auto on start_checked with passing preflight should commit");
+  assert.equal(started.status, "in_progress");
+  assert.equal(started.stage, "execute");
+
+  const persisted = await readTask(root, ready);
+  assert.equal(persisted.status, "in_progress", "task.json must be updated on disk");
+});
+
+test("workflow_run mode=auto on a gate-checked action returns blockers without mutating when gates fail", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-auto-fail-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Auto Fail", level: "standard", slug: "auto-fail" });
+  const taskId = create.task!;
+  const beforeTask = await readTask(root, taskId);
+
+  // start_checked on a planning/grill task that has not been finalized must fail preflight.
+  const blocked = await workflowRun(root, { action: "start_checked", mode: "auto", task: taskId });
+  assert.equal(blocked.ok, false, "auto must surface preflight failures as blockers");
+  assert.equal(blocked.mutated, false, "auto must NOT mutate when preflight fails");
+  assert.ok(blocked.blockedBy.length > 0, "blockedBy should list the failing gates");
+
+  const afterTask = await readTask(root, taskId);
+  assert.equal(afterTask.status, beforeTask.status, "task status must remain unchanged after blocked auto");
+  assert.equal(afterTask.stage, beforeTask.stage, "task stage must remain unchanged after blocked auto");
+});
+
+test("workflow_run mode=auto on a non-whitelisted action falls back to dry_run preview semantics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-auto-fallback-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Auto Fallback", level: "simple", slug: "auto-fallback" });
+  const taskId = create.task!;
+  const prdPath = join(root, ".workflow/tasks", taskId, "prd.md");
+  const before = await readFile(prdPath, "utf8");
+
+  // update_prd_section is intentionally NOT in the auto whitelist: PRD writes deserve a dry_run preview.
+  const result = await workflowRun(root, { action: "update_prd_section", mode: "auto", task: taskId, prdSection: "openQuestions", prdContent: "Auto fallback test", prdUpdateMode: "replace" });
+  assert.equal(result.ok, true);
+  assert.equal(result.mutated, false, "auto on non-whitelisted action must NOT write");
+  assert.equal(result.mode, "dry_run", "auto on non-whitelisted action must report dry_run mode");
+
+  const after = await readFile(prdPath, "utf8");
+  assert.equal(after, before, "PRD must remain unchanged when auto falls back to dry_run");
+});
+
+test("workflow_run mode=auto inside batch resolves per child action", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-auto-batch-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Auto Batch", level: "simple", slug: "auto-batch" });
+  const taskId = create.task!;
+
+  // Batch in execute mode with two auto children: init_manifests is whitelisted -> executes;
+  // upsert_manifest_entry is whitelisted too -> executes. Both should mutate.
+  const result = await workflowRun(root, { action: "batch", mode: "execute", actions: [
+    { action: "init_manifests", mode: "auto", task: taskId },
+    { action: "upsert_manifest_entry", mode: "auto", task: taskId, manifest: "implement", file: "src/auto.ts", reason: "auto batch test" },
+  ] });
+  assert.equal(result.ok, true);
+  assert.equal(result.mutated, true, "batch with whitelisted auto children should commit");
+  assert.equal(result.results?.length, 2);
+  assert.ok(result.results?.every((child) => child.mode === "execute"), "each whitelisted auto child should be normalized to execute");
 });

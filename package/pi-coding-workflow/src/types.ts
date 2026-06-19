@@ -6,6 +6,7 @@ export type ContextMode = "none" | "signal" | "lite" | "brief" | "task" | "check
 export type DetailMode = "lite" | "summary" | "normal" | "full";
 export type RunDetailMode = "lite" | "summary" | "full";
 export type RunMode = "dry_run" | "execute";
+export type RunInputMode = RunMode | "auto";
 export type DelegateWritePolicy = "report_only" | "task_files_only" | "manifest_only";
 export type WorkflowDelegateStatus = "planned" | "completed" | "blocked" | "needs_user" | "needs_parent_action" | "failed" | "budget_exceeded";
 export type ProfileName = "generic" | "unity";
@@ -231,7 +232,7 @@ export type WorkflowManifestEntryMode = "append" | "replace";
 export interface WorkflowRunBatchItem {
   action: WorkflowRunSingleAction;
   task?: string;
-  mode?: RunMode;
+  mode?: RunInputMode;
   detail?: RunDetailMode;
   title?: string;
   level?: FlowLevel;
@@ -273,7 +274,7 @@ export interface WorkflowRunBatchItem {
 export interface WorkflowRunInput {
   action: WorkflowRunAction;
   task?: string;
-  mode?: RunMode;
+  mode?: RunInputMode;
   detail?: RunDetailMode;
   title?: string;
   level?: FlowLevel;

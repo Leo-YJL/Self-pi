@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import type { FlowLevel, WorkflowManifestAgent, WorkflowManifestEntryInput, WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
+import type { FlowLevel, RunInputMode, RunMode, WorkflowManifestAgent, WorkflowManifestEntryInput, WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
 import { createTask, findActiveTask, listArchivedTasks, listRootTasks, readTask, slugify, todayPrefix, tryReadTask, writeTask, type WorkflowTaskJson } from "./task.ts";
 import { checkpoint } from "./checkpoint.ts";
 import { validateTask } from "./validate.ts";
@@ -20,6 +20,29 @@ const execFileAsync = promisify(execFile);
 
 const PRD_SECTION_KEYS = new Set<PrdSectionKey>(["executionContract", "goal", "requirements", "acceptanceCriteria", "validationPlan", "openQuestions", "finalConfirmation", "outOfScope", "definitionOfDone", "grillResult", "architectureImpact"]);
 
+// Actions whose execute path always runs preflight first and returns a structured blocker
+// without mutating when gates fail. For these, mode="auto" resolves to "execute": gate-checked
+// without requiring a separate dry_run round-trip. Non-listed actions (PRD writes, batch,
+// sync_manifest_from_diff, checkpoint) keep their dry_run preview semantics; mode="auto" on
+// them resolves to "dry_run" so explicit content/diff review still happens.
+const AUTO_ELIGIBLE_ACTIONS = new Set<string>([
+  "create_from_grill",
+  "create_child",
+  "init_manifests",
+  "upsert_manifest_entry",
+  "remove_manifest_entry",
+  "finalize_grill",
+  "start_checked",
+  "finish_run",
+  "archive",
+  "reopen",
+]);
+
+function normalizeMode(action: string | undefined, requested: RunInputMode | undefined): RunMode {
+  if (requested === "auto") return AUTO_ELIGIBLE_ACTIONS.has(action ?? "") ? "execute" : "dry_run";
+  return requested ?? "dry_run";
+}
+
 export async function workflowRun(root: string, input: WorkflowRunInput): Promise<WorkflowRunOutput> {
   const startedAt = Date.now();
   const raw = await workflowRunInternal(root, input, 0);
@@ -29,9 +52,9 @@ export async function workflowRun(root: string, input: WorkflowRunInput): Promis
 }
 
 async function workflowRunInternal(root: string, input: WorkflowRunInput, depth: number): Promise<WorkflowRunOutput> {
-  const mode = input.mode ?? "dry_run";
   const action = input.action;
   if (!action) throw new Error("workflow_run requires action");
+  const mode = normalizeMode(action, input.mode);
 
   if (action === "batch") {
     if (depth > 0) return blocked(action, mode, "nested_batch_not_supported", "workflow_run batch cannot contain another batch action.");
@@ -50,7 +73,7 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
       const childInput = {
         ...item,
         action: item.action,
-        mode: mode === "dry_run" ? "dry_run" : item.mode ?? "execute",
+        mode: mode === "dry_run" ? "dry_run" : normalizeMode(item.action, item.mode ?? "execute"),
         task: item.task ?? input.task,
         detail: item.detail ?? input.detail ?? "lite",
         roundId: item.roundId ?? (item.action === "record_grill_decision" ? batchDecisionRoundId : input.roundId),
@@ -535,7 +558,7 @@ function plannedAction(item: WorkflowRunBatchItem, input: WorkflowRunInput, mode
   return {
     index,
     action: item.action,
-    mode: mode === "dry_run" ? "dry_run" : item.mode ?? "execute",
+    mode: mode === "dry_run" ? "dry_run" : normalizeMode(item.action, item.mode ?? "execute"),
     task: item.task ?? input.task,
     title: item.title,
     summary: item.action === "create_from_grill" || item.action === "create_child" ? `Plan ${item.action}: ${item.title ?? "untitled"}` : item.action === "record_grill_decision" ? `Plan record_grill_decision: ${item.decisionId ?? "unnamed"}` : item.action === "record_round_and_update_prd" ? `Plan record_round_and_update_prd: ${item.decisions?.length ?? 0} decision(s), ${item.prdUpdates?.length ?? 0} PRD update(s)` : `Plan ${item.action}`,

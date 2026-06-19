@@ -158,13 +158,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "workflow_run",
     label: "Workflow Run",
-    description: "Controlled workflow stage actuator. Dry-run by default; supports action=batch with actions[] for deterministic transactions.",
-    promptSnippet: "Controlled workflow stage actuator for create/start/checkpoint/finish/batch actions.",
-    promptGuidelines: ["Use workflow_run after workflow_next recommends an action.", "Prefer mode=execute directly for gate-checked state actions (create_from_grill, init_manifests, upsert_manifest_entry, remove_manifest_entry, finalize_grill, start_checked, finish_run, archive, reopen): they run preflight first and return blockers without mutating when they fail, so a separate dry_run round-trip is usually unnecessary.", "Use mode=dry_run only to preview PRD writes (record_round_and_update_prd, update_prd_section), to review a batch plan before committing, or when explicitly uncertain.", "Use action=batch to combine deterministic steps into one transaction."],
+    description: "Controlled workflow stage actuator. Dry-run by default; supports mode=auto for gate-checked actions and action=batch with actions[] for deterministic transactions.",
+    promptSnippet: "Controlled workflow stage actuator for create/start/checkpoint/finish/batch actions; mode=auto runs gates first for safe state changes.",
+    promptGuidelines: ["Use workflow_run after workflow_next recommends an action.", "Prefer mode=auto for gate-checked state actions (create_from_grill, init_manifests, upsert_manifest_entry, remove_manifest_entry, finalize_grill, start_checked, finish_run, archive, reopen): the engine runs preflight first and either commits or returns blockers without mutating, removing the dry_run+execute round-trip. mode=auto on PRD writes / batch / sync_manifest_from_diff falls back to dry_run so previews still happen.", "Use mode=dry_run only to preview PRD writes (record_round_and_update_prd, update_prd_section), to review a batch plan before committing, or when explicitly uncertain.", "Use mode=execute when you want to force a write without auto's safety net.", "Use action=batch to combine deterministic steps into one transaction."],
     parameters: Type.Object({
       action: StringEnum(ACTION_VALUES),
       task: Type.Optional(Type.String()),
-      mode: Type.Optional(StringEnum(["dry_run", "execute"] as const)),
+      mode: Type.Optional(StringEnum(["dry_run", "execute", "auto"] as const)),
       detail: Type.Optional(StringEnum(RUN_DETAIL_VALUES)),
       title: Type.Optional(Type.String()),
       level: Type.Optional(StringEnum(FLOW_VALUES)),

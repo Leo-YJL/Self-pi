@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 - unreleased
+
+### Added
+
+- `workflow_run` accepts `mode: "auto"` for gate-checked state actions (`create_from_grill`, `create_child`, `init_manifests`, `upsert_manifest_entry`, `remove_manifest_entry`, `finalize_grill`, `start_checked`, `finish_run`, `archive`, `reopen`). The engine runs preflight first and either commits (when gates pass) or returns a structured blocker without mutating (when gates fail), removing the `dry_run` + `execute` round-trip. `mode: "auto"` on PRD writes / `batch` / `sync_manifest_from_diff` falls back to `dry_run` so previews still happen.
+- `workflow_run` `promptGuidelines` now recommends `mode=auto` as the default for those gate-checked actions.
+
+### Changed
+
+- `workflow_next` signal-mode `detailRef` artifacts use a deterministic id derived from task + PRD/manifest hashes, and `writeJsonArtifact` skips the rewrite when an artifact with the same explicit id already exists. Identical signal payloads now reuse the same file instead of accumulating near-duplicate runtime artifacts.
+- Telemetry warning `workflow_next_signal_suggested` now fires after 5 lite-only `workflow_next` calls (down from 12) so the suggestion to switch to `includeContext=signal` surfaces earlier.
+- `workflow-finish` skill clarifies the `reopen` PRD dead-zone: requirements changes should be a new task rather than PRD edits after `reopen` (final confirmation would be invalidated and `finalize_grill` requires the `planning` state).
+
+### Tests
+
+- Added auto-mode coverage: passing-gate execute, failing-gate blocker, non-whitelisted fallback to `dry_run`, and per-child normalization inside `batch`.
+- Added signal artifact dedup test (same payload reuses ref + mtime; mutated PRD produces new ref).
+- Added `workflow_next_signal_suggested` threshold test (fires at 5 lite calls, clears after one signal call).
+
+## 0.3.1 - 2026-06-16 (lite slim, included in 0.4.0)
+
+### Changed
+
+- `workflow_next` lite-mode output drops the duplicate `blockedBy[]` (only `blockedCodes[]` is inlined), the natural-language `context.summary` is cleared, and `adaptiveControl.reasons`/`stopConditions` are stripped. Single-call lite output dropped from ~1141 tokens to ~530 tokens (-54%).
+- `workflow_next` no-workflow branch no longer recommends `checkpoint`; it returns the `workflow_dir_missing` warning without a misleading recommended tool.
+- `list_tasks` output drops the duplicate `preflight.tasks` array; only the top-level `tasks` array is returned.
+- `cache.ts` schema bumped to v3 (output format changed; older caches are safely treated as miss).
+- Telemetry events record `contextMode` and the summary distinguishes lite vs signal call counts.
+
 ## 0.3.0 - 2026-06-15
 
 ### Added

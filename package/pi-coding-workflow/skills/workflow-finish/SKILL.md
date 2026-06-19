@@ -9,7 +9,7 @@ Use this generic skill only for active coding workflow projects using `pi-coding
 ## Rules
 
 - Prefer `workflow_next({ agent: "finish", includeContext: "signal" })` for low-token read-only routing and finish-gate adaptive guidance; request finish context only when evidence refs are insufficient.
-- If `adaptiveControl.strategy` is `deterministic_preflight`, follow the suggested `workflow_run` call. Safe execute paths run preflight first and return blockers without mutating when gates fail; use dry-run when the user wants a preview.
+- If `adaptiveControl.strategy` is `deterministic_preflight`, follow the suggested `workflow_run` call. Prefer `mode=auto` for `finish_run`/`archive`/`reopen`: the engine runs preflight first and either commits or returns blockers without mutating, so the dry_run + execute round-trip is unnecessary. Use `mode=dry_run` only when the user explicitly wants a preview.
 - If `adaptiveControl.strategy` is `subagent_brief`, prefer the recommended `workflow_delegate` finish dry-run/execute path; otherwise follow the returned `finish` brief manually and only mark PRD checklist items complete when evidence exists.
 - Prefer `workflow_run` for controlled workflow actions.
 - Use `workflow_run archive` only after `finish_run` succeeds and the user explicitly confirms; use `reopen` only with explicit confirmation and a reason. `reopen` returns a completed task to `in_progress/execute`; it does not reopen Stage 1 grill.
