@@ -1,14 +1,19 @@
 # Changelog
 
-## 0.4.0 - unreleased
+## 0.4.0 - 2026-06-20
 
 ### Added
 
 - `workflow_run` accepts `mode: "auto"` for gate-checked state actions (`create_from_grill`, `create_child`, `init_manifests`, `upsert_manifest_entry`, `remove_manifest_entry`, `finalize_grill`, `start_checked`, `finish_run`, `archive`, `reopen`). The engine runs preflight first and either commits (when gates pass) or returns a structured blocker without mutating (when gates fail), removing the `dry_run` + `execute` round-trip. `mode: "auto"` on PRD writes / `batch` / `sync_manifest_from_diff` falls back to `dry_run` so previews still happen.
 - `workflow_run` `promptGuidelines` now recommends `mode=auto` as the default for those gate-checked actions.
+- Phase 1 local workflow memory RAG: optional `rag.enabled=true` config, `workflow_run` actions `rag_status` / `rag_reindex`, lexical JSONL chunks under `.workflow/.runtime/rag/chunks.jsonl`, and compact `workflow_next.retrieval.topRefs` with full query artifacts under `.workflow/.runtime/rag/queries/**`. This phase is zero-dependency and does not call embedding services.
 
 ### Changed
 
+- `workflow_next` now honors `.workflow/config.json` `context.defaultMode` when `includeContext` is omitted, making the existing config field effective while preserving the default `lite` behavior for existing configs.
+- Explicit-task `workflow_next` calls now avoid scanning every root task; task candidate discovery still runs for implicit active-task routing.
+- Manifest maintenance now batches multi-entry upserts for `init_manifests` and `sync_manifest_from_diff`, reducing repeated JSONL reads/writes while keeping explicit execute requirements.
+- PRD parsing and `record_round_and_update_prd` avoid redundant PRD reads/splits during deterministic round recording.
 - `workflow_next` no longer mirrors `evidenceRefs`, `omitted`, and `tokenBudget` at the top level — these stay only inside `context.*` (their canonical location). Removes ~100 tokens / call duplication; measured ~20% reduction on every `workflow_next` payload (~500 tokens / lifecycle in standard scenarios). Top-level fields remain optional in the schema for backward compatibility but are no longer populated.
 - `workflow_next` cache-miss path now spawns `git status --porcelain` exactly once per call. Both the cache-key fingerprint and the workspace summary inside the context bundle reuse a shared `readGitPorcelain` result. Saves one `git` process spawn (~30–80 ms on Windows) per cache miss.
 - `workflow_run` preflight artifact id is now derived from the action + task + preflight payload (no `createdAt` in the id material). Identical preflight reruns reuse the same artifact file instead of writing a near-duplicate. Trivial preflight payloads (e.g. `list_tasks` pagination metadata, `sync_manifest_from_diff` with no candidates) are no longer written to disk at all — the inline summary already covers them.
@@ -23,6 +28,7 @@
 - Added `workflow_next_signal_suggested` threshold test (fires at 5 lite calls, clears after one signal call).
 - Added top-level field dedup test (`workflow_next` no longer mirrors `evidenceRefs / omitted / tokenBudget` at the root).
 - Added preflight dedup tests (identical `start_checked` reruns reuse the artifact mtime; `list_tasks` does not produce a preflight file).
+- Added RAG Phase 1 tests for disabled-by-default behavior, lexical reindex dry-run/execute, `rag_status`, and compact `workflow_next` retrieval refs.
 
 ## 0.3.1 - 2026-06-16 (lite slim, included in 0.4.0)
 

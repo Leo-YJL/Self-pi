@@ -61,13 +61,26 @@ export async function initTaskManifests(
 }
 
 export async function upsertManifestEntry(root: string, task: WorkflowTaskJson, agent: WorkflowManifestAgent, entry: WorkflowManifestEntryInput): Promise<WorkflowManifestWriteResult> {
+  const result = await upsertManifestEntries(root, task, agent, [entry]);
   const normalized = normalizeManifestInput(entry);
+  return {
+    ...result,
+    entries: [normalized],
+    summary: `${agent} manifest ${result.summary.includes("updated") ? "updated" : "added"} ${normalized.file}${result.summary.includes("removed duplicate entries") ? " and removed duplicate entries" : ""}.`,
+  };
+}
+
+export async function upsertManifestEntries(root: string, task: WorkflowTaskJson, agent: WorkflowManifestAgent, entries: WorkflowManifestEntryInput[]): Promise<WorkflowManifestWriteResult> {
+  const normalizedEntries = entries.map(normalizeManifestInput);
+  const desiredByFile = new Map<string, WorkflowManifestEntryInput>();
+  for (const entry of normalizedEntries) desiredByFile.set(entry.file, entry);
+
   const relPath = manifestRelPath(task, agent);
   const absPath = resolveInsideRoot(root, relPath);
   const existing = existsSync(absPath) ? await readFile(absPath, "utf8") : "";
   const lines = existing.split(/\r?\n/);
   const nextLines: string[] = [];
-  let replaced = false;
+  const updatedFiles = new Set<string>();
   let skippedDuplicate = false;
 
   for (const line of lines) {
@@ -78,10 +91,16 @@ export async function upsertManifestEntry(root: string, task: WorkflowTaskJson, 
       continue;
     }
     const file = typeof parsed.file === "string" ? normalizeSlash(parsed.file.trim()) : "";
-    if (file === normalized.file) {
-      if (!replaced) {
-        nextLines.push(serializeManifestEntry(normalized));
-        replaced = true;
+    if (updatedFiles.has(file)) {
+      skippedDuplicate = true;
+      continue;
+    }
+    const desired = desiredByFile.get(file);
+    if (desired) {
+      if (!updatedFiles.has(file)) {
+        nextLines.push(serializeManifestEntry(desired));
+        updatedFiles.add(file);
+        desiredByFile.delete(file);
       } else {
         skippedDuplicate = true;
       }
@@ -90,14 +109,27 @@ export async function upsertManifestEntry(root: string, task: WorkflowTaskJson, 
     nextLines.push(line);
   }
 
-  if (!replaced) nextLines.push(serializeManifestEntry(normalized));
+  const addedEntries = [...desiredByFile.values()];
+  nextLines.push(...addedEntries.map(serializeManifestEntry));
   const next = `${nextLines.join("\n").replace(/\s+$/g, "")}\n`;
   const changed = next !== `${existing.replace(/\s+$/g, "")}\n`;
   if (changed) {
     await mkdir(resolveInsideRoot(root, `.workflow/tasks/${task.id}`), { recursive: true });
     await writeFile(absPath, next, "utf8");
   }
-  return { path: relPath, changed, entries: [normalized], summary: `${agent} manifest ${replaced ? "updated" : "added"} ${normalized.file}${skippedDuplicate ? " and removed duplicate entries" : ""}.` };
+
+  const updatedCount = updatedFiles.size;
+  const addedCount = addedEntries.length;
+  const summaryParts = [
+    updatedCount > 0 ? `updated ${updatedCount}` : undefined,
+    addedCount > 0 ? `added ${addedCount}` : undefined,
+  ].filter(Boolean).join(" and ") || "already matched";
+  return {
+    path: relPath,
+    changed,
+    entries: [...new Map(normalizedEntries.map((entry) => [entry.file, entry])).values()],
+    summary: `${agent} manifest ${summaryParts} entr${normalizedEntries.length === 1 ? "y" : "ies"}${skippedDuplicate ? " and removed duplicate entries" : ""}.`,
+  };
 }
 
 export async function removeManifestEntry(root: string, task: WorkflowTaskJson, agent: WorkflowManifestAgent, file: string): Promise<WorkflowManifestWriteResult> {

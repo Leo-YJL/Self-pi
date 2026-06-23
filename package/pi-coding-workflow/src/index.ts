@@ -11,7 +11,7 @@ import { confirmPrdFinal } from "./engine/prdConfirm.ts";
 import { buildWorkflowCompactionSummary } from "./engine/compaction.ts";
 
 const PROFILE_VALUES = ["generic", "unity"] as const;
-const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "record_round_and_update_prd", "append_prd_decisions", "update_prd_section", "init_manifests", "upsert_manifest_entry", "remove_manifest_entry", "sync_manifest_from_diff", "list_tasks", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive", "reopen"] as const;
+const SINGLE_ACTION_VALUES = ["create_from_grill", "create_child", "record_grill_decision", "record_round_and_update_prd", "append_prd_decisions", "update_prd_section", "init_manifests", "upsert_manifest_entry", "remove_manifest_entry", "sync_manifest_from_diff", "list_tasks", "rag_status", "rag_reindex", "finalize_grill", "start_checked", "checkpoint", "finish_run", "archive", "reopen"] as const;
 const ACTION_VALUES = [...SINGLE_ACTION_VALUES, "batch"] as const;
 const FLOW_VALUES = ["simple", "standard", "complex", "goal"] as const;
 const CONTEXT_VALUES = ["none", "signal", "lite", "brief", "task", "check", "finish"] as const;
@@ -28,6 +28,7 @@ const PRD_UPDATE_MODE_VALUES = ["replace", "append"] as const;
 const TASK_STATUS_FILTER_VALUES = ["planning", "in_progress", "completed", "no_task", "active", "all"] as const;
 const MANIFEST_AGENT_VALUES = ["implement", "check"] as const;
 const MANIFEST_ENTRY_MODE_VALUES = ["append", "replace"] as const;
+const RAG_SOURCE_VALUES = ["spec", "activeTask", "historicalTasks", "tasks", "runtimeSummaries", "manifestFiles", "code"] as const;
 
 const WorkflowRoundDecisionSchema = Type.Object({
   decisionId: Type.String(),
@@ -91,6 +92,8 @@ const WorkflowRunBatchItemSchema = Type.Object({
   taskStatus: Type.Optional(StringEnum(TASK_STATUS_FILTER_VALUES)),
   limit: Type.Optional(Type.Number()),
   includeArchived: Type.Optional(Type.Boolean()),
+  sources: Type.Optional(Type.Array(StringEnum(RAG_SOURCE_VALUES))),
+  changedOnly: Type.Optional(Type.Boolean()),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -201,6 +204,8 @@ export default function (pi: ExtensionAPI) {
       taskStatus: Type.Optional(StringEnum(TASK_STATUS_FILTER_VALUES)),
       limit: Type.Optional(Type.Number()),
       includeArchived: Type.Optional(Type.Boolean()),
+      sources: Type.Optional(Type.Array(StringEnum(RAG_SOURCE_VALUES))),
+      changedOnly: Type.Optional(Type.Boolean()),
       actions: Type.Optional(Type.Array(WorkflowRunBatchItemSchema)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

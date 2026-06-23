@@ -59,13 +59,13 @@ npm install @leo-yjl/pi-coding-workflow
 - `adaptiveControl`
 - `meta`
 
-默认：
+默认遵循 `.workflow/config.json` 的 `context.defaultMode`；新初始化配置仍为 `lite`：
 
 ```json
 { "includeContext": "lite" }
 ```
 
-需要极低 token 的路由信号时可请求：
+需要极低 token 的路由信号时可请求，或把 `context.defaultMode` 配置为 `signal`：
 
 ```json
 { "includeContext": "signal" }
@@ -120,6 +120,8 @@ upsert_manifest_entry
 remove_manifest_entry
 sync_manifest_from_diff
 list_tasks
+rag_status
+rag_reindex
 finalize_grill
 start_checked
 checkpoint
@@ -141,6 +143,7 @@ batch
 - `update_prd_section` 可确定性 replace/append 指定 PRD section（如 Requirements、Acceptance Criteria、Validation Plan、Open Questions），减少手工 edit 风险。
 - `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` 负责确定性维护 `implement.jsonl` 和 `check.jsonl`；不要优先让 LLM 裸写 JSONL。`sync_manifest_from_diff` dry-run 会列出候选并提示 execute 所需的 `manifest` 与 entries。
 - `list_tasks` 可列出任务，支持 `status`/`taskStatus`、`limit`、`includeArchived`；默认只返回 active 任务且最多 12 个，避免 token 膨胀。`archive` 会在用户确认后移动已完成任务；`reopen` 可在用户确认并提供原因后把已完成任务回退到执行阶段。
+- `rag_status` / `rag_reindex` 是 Phase 1 本地 workflow memory 维护动作：默认 RAG 关闭；启用 `rag.enabled=true` 后，`workflow_next` 可从 `.workflow/.runtime/rag/chunks.jsonl` 的本地 lexical index 返回 compact `retrieval.topRefs`，完整 query 结果写入 `.workflow/.runtime/rag/queries/**`。当前阶段不调用远程 embedding 服务、不引入向量数据库。
 - `standard` 任务至少需要 2 个业务 grill round，`complex` / `goal` 至少需要 3 个；每个业务轮次后要先更新 PRD，业务决策必须写入 PRD 的 `Grill Decision Log`，最终确认必须单独发生在最新 PRD 上。
 - `start_checked` 和 `finish_run` 会执行确定性 preflight；对低风险 gate action，`execute` 会先校验，失败时返回 blocker 且不会推进状态，dry-run 主要用于预览和解释。
 - 当前版本不会执行 git commit 或 push；`.workflow/config.json` 中的 git 字段是保留策略配置，不能当作自动提交开关。
@@ -343,13 +346,13 @@ Main fields returned:
 - `adaptiveControl`
 - `meta`
 
-Default request:
+The default follows `.workflow/config.json` `context.defaultMode`; newly initialized configs still use `lite`:
 
 ```json
 { "includeContext": "lite" }
 ```
 
-For very low-token routing signals, request:
+For very low-token routing signals, request this explicitly or set `context.defaultMode` to `signal`:
 
 ```json
 { "includeContext": "signal" }
@@ -404,6 +407,8 @@ upsert_manifest_entry
 remove_manifest_entry
 sync_manifest_from_diff
 list_tasks
+rag_status
+rag_reindex
 finalize_grill
 start_checked
 checkpoint
@@ -425,6 +430,7 @@ Rules:
 - `update_prd_section` deterministically replaces/appends a target PRD section such as Requirements, Acceptance Criteria, Validation Plan or Open Questions, reducing manual edit risk.
 - `init_manifests` / `upsert_manifest_entry` / `remove_manifest_entry` / `sync_manifest_from_diff` deterministically maintain `implement.jsonl` and `check.jsonl`; prefer them over hand-written JSONL. `sync_manifest_from_diff` dry-run lists candidates and reports the `manifest`/entries required for execute.
 - `list_tasks` lists workflow tasks and supports `status`/`taskStatus`, `limit`, and `includeArchived`; by default it returns active tasks only and at most 12 items to avoid token growth. `archive` moves a completed task after user confirmation; `reopen` moves a completed task back to execution after confirmation and a reason.
+- `rag_status` / `rag_reindex` maintain the Phase 1 local workflow memory index. RAG is disabled by default; when `rag.enabled=true`, `workflow_next` can return compact lexical `retrieval.topRefs` from `.workflow/.runtime/rag/chunks.jsonl`, while full query results are written under `.workflow/.runtime/rag/queries/**`. This phase does not call remote embedding services or require a vector database.
 - `standard` tasks require at least 2 business grill rounds, while `complex` / `goal` require at least 3; the PRD must be updated after each business round, business decisions must appear in the PRD `Grill Decision Log`, and final confirmation must be separate and tied to the latest PRD.
 - `start_checked` and `finish_run` run deterministic preflight checks first; for low-risk gate actions, `execute` validates first and returns blockers without mutating when gates fail, while dry-run remains useful for preview/explanation.
 - This version does not run git commit or push; git fields in `.workflow/config.json` are reserved policy settings, not automatic commit switches.

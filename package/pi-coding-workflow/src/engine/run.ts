@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import type { FlowLevel, RunInputMode, RunMode, WorkflowManifestAgent, WorkflowManifestEntryInput, WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
+import type { FlowLevel, RunInputMode, RunMode, WorkflowManifestAgent, WorkflowManifestEntryInput, WorkflowRagSource, WorkflowRecommendedCall, WorkflowRollbackHint, WorkflowRunBatchItem, WorkflowRunInput, WorkflowRunOutput, WorkflowTransaction } from "../types.ts";
 import { createTask, findActiveTask, listArchivedTasks, listRootTasks, readTask, slugify, todayPrefix, tryReadTask, writeTask, type WorkflowTaskJson } from "./task.ts";
 import { checkpoint } from "./checkpoint.ts";
 import { validateTask } from "./validate.ts";
@@ -11,10 +11,11 @@ import { estimateTokens, RUN_RESULT_TARGET_TOKENS } from "./contextBudget.ts";
 import { writeJsonArtifact, stableShortHash } from "../artifacts/writeToolResult.ts";
 import { writeWorkflowTelemetry } from "./telemetry.ts";
 import { appendGrillDecision, finalizeGrillState, refreshGrillPrdCoverage, validateGrillFinalization } from "./grill.ts";
-import { appendPrdDecisionLog, readPrdKernel, updatePrdSection, type PrdSectionKey } from "./prd.ts";
+import { appendPrdDecisionLog, buildPrdKernelFromMarkdown, readPrdKernel, updatePrdSection, type PrdSectionKey } from "./prd.ts";
 import { assertRepoRelative, normalizeSlash, resolveInsideRoot } from "../safety/pathPolicy.ts";
 import { readConfig } from "./config.ts";
-import { initTaskManifests, removeManifestEntry, upsertManifestEntry } from "./manifest.ts";
+import { initTaskManifests, removeManifestEntry, upsertManifestEntry, upsertManifestEntries } from "./manifest.ts";
+import { planWorkflowRagReindex, readWorkflowRagStatus, writeWorkflowRagIndex } from "./rag/indexStore.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -152,6 +153,33 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     return { ...ok(action, mode, false, total > 0 ? `Found ${total} matching workflow task(s); returned ${listed.tasks.length}.` : "No workflow tasks found."), tasks: listed.tasks.map(taskSummary) as any, preflight: { total, limit: listed.limit, status: listed.status, includeArchived: listed.includeArchived }, nextAction: listed.tasks.length > 0 ? "select_task" : "no_task_grill" };
   }
 
+  if (action === "rag_status") {
+    const config = await readConfig(root);
+    const status = await readWorkflowRagStatus(root, config);
+    return { ...ok(action, mode, false, `Workflow RAG index is ${status.indexState}; chunks=${status.chunkCount}; enabled=${status.enabled}.`), preflight: status, nextAction: status.indexState === "missing" ? "rag_reindex" : "continue" };
+  }
+
+  if (action === "rag_reindex") {
+    if (!existsSync(resolveInsideRoot(root, ".workflow"))) return blocked(action, mode, "workflow_dir_missing", "rag_reindex requires an initialized .workflow directory.");
+    const config = await readConfig(root);
+    const sources = validRagSources(input.sources);
+    const plan = await planWorkflowRagReindex(root, config, { sources });
+    const preflight = { chunkCount: plan.chunkCount, sourceHash: plan.sourceHash, sources: plan.sources, chunksRef: plan.chunksRef, indexRef: plan.indexRef };
+    if (mode !== "execute") {
+      return { ...ok(action, mode, false, `Dry-run rag_reindex; would write ${plan.chunkCount} lexical memory chunk(s).`), preflight, nextAction: "execute_rag_reindex" };
+    }
+    const written = await writeWorkflowRagIndex(root, plan);
+    return {
+      ...ok(action, mode, true, `Reindexed workflow RAG memory with ${written.chunkCount} lexical chunk(s).`),
+      preflight,
+      artifacts: [
+        { kind: "rag-chunks", ref: written.chunksRef, summary: `${written.chunkCount} workflow memory chunk(s)` },
+        { kind: "rag-index", ref: written.indexRef, summary: `sourceHash=${written.sourceHash}` },
+      ],
+      nextAction: "workflow_next",
+    };
+  }
+
   if (action === "record_grill_decision") {
     const task = await resolveTask(root, input.task);
     if (!task) return blocked(action, mode, "missing_task", "record_grill_decision requires task or an active planning task.");
@@ -200,7 +228,7 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     }
 
     const markdownBefore = await readFile(absPrdPath, "utf8");
-    const prdBefore = await readPrdKernel(root, task, "compact");
+    const prdBefore = buildPrdKernelFromMarkdown(task, prdPath, markdownBefore, "compact");
     const sharedRoundKind = input.roundKind ?? decisions[0]?.roundKind ?? "custom";
     const sharedRoundId = input.roundId ?? decisions[0]?.roundId ?? `round-${(task.grill?.roundLog?.length ?? 0) + 1}-${sharedRoundKind}`;
     const recordedDecisions = decisions.map((decision) => appendGrillDecision(task, {
@@ -237,7 +265,7 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     const normalizedBefore = `${markdownBefore.replace(/\s+$/g, "")}\n`;
     const prdChanged = nextMarkdown !== normalizedBefore;
     if (prdChanged) await writeFile(absPrdPath, nextMarkdown, "utf8");
-    const prdAfter = await readPrdKernel(root, task, "compact");
+    const prdAfter = buildPrdKernelFromMarkdown(task, prdPath, nextMarkdown, "compact");
     refreshGrillPrdCoverage(task, prdAfter.decisions.presentDecisionIds, prdAfter.source.confirmationHash ?? prdAfter.source.hash);
     await writeTask(root, task);
 
@@ -285,12 +313,12 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     if (mode !== "execute") return { ...ok(action, mode, false, `Dry-run init_manifests; would ensure manifest skeletons for ${task.id} and upsert ${implementCount} implement / ${checkCount} check entr${implementCount + checkCount === 1 ? "y" : "ies"}.`), task: task.id, status: task.status, stage: task.stage, nextAction: "execute_init_manifests" };
     const initialized = await initTaskManifests(root, task, { overwrite: input.overwrite === true });
     const changed: string[] = [initialized.implement, initialized.check].filter((result) => result.changed).map((result) => result.path);
-    for (const entry of implementEntries.entries) {
-      const result = await upsertManifestEntry(root, task, "implement", entry);
+    if (implementEntries.entries.length > 0) {
+      const result = await upsertManifestEntries(root, task, "implement", implementEntries.entries);
       if (result.changed) changed.push(result.path);
     }
-    for (const entry of checkEntries.entries) {
-      const result = await upsertManifestEntry(root, task, "check", entry);
+    if (checkEntries.entries.length > 0) {
+      const result = await upsertManifestEntries(root, task, "check", checkEntries.entries);
       if (result.changed) changed.push(result.path);
     }
     return { ...ok(action, mode, changed.length > 0, `Initialized manifest skeletons for ${task.id}; upserted ${implementCount} implement / ${checkCount} check entries.`), task: task.id, status: task.status, stage: task.stage, artifacts: [...new Set(changed)].map((ref) => ({ kind: "manifest", ref, summary: "manifest updated" })), nextAction: "continue_grill_or_start_checked" };
@@ -341,11 +369,8 @@ async function workflowRunInternal(root: string, input: WorkflowRunInput, depth:
     }
     if (!manifest) return blocked(action, mode, "missing_manifest", "sync_manifest_from_diff execute requires manifest=implement or manifest=check plus explicit entries/reasons.");
     if (entries.entries.length === 0) return blocked(action, mode, "missing_manifest_entries", "sync_manifest_from_diff execute requires explicit entries with file and reason; dry_run lists candidates only.");
-    const changed: string[] = [];
-    for (const entry of entries.entries) {
-      const result = await upsertManifestEntry(root, task, manifest, entry);
-      if (result.changed) changed.push(result.path);
-    }
+    const result = await upsertManifestEntries(root, task, manifest, entries.entries);
+    const changed: string[] = result.changed ? [result.path] : [];
     return { ...ok(action, mode, changed.length > 0, `Synced ${entries.entries.length} explicit ${manifest} manifest entr${entries.entries.length === 1 ? "y" : "ies"} from diff review.`), task: task.id, status: task.status, stage: task.stage, preflight: { candidates }, artifacts: [...new Set(changed)].map((ref) => ({ kind: "manifest", ref, summary: "manifest synced" })), nextAction: "continue" };
   }
 
@@ -596,6 +621,12 @@ function taskSummary(task: WorkflowTaskJson): Record<string, unknown> {
 
 function parseManifestAgent(value: unknown): WorkflowManifestAgent | null {
   return value === "implement" || value === "check" ? value : null;
+}
+
+function validRagSources(value: unknown): WorkflowRagSource[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const allowed = new Set<WorkflowRagSource>(["spec", "activeTask", "historicalTasks", "tasks", "runtimeSummaries", "manifestFiles", "code"]);
+  return value.filter((item): item is WorkflowRagSource => allowed.has(item as WorkflowRagSource));
 }
 
 function manifestEntryFromInput(file: unknown, reason: unknown): { entry: WorkflowManifestEntryInput; error?: never } | { entry?: never; error: { code: string; message: string } } {

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import type { DetailMode, WorkflowContextSummary, WorkflowNextInput, WorkflowNextOutput, WorkflowOmittedArtifact, WorkflowResultMeta } from "../types.ts";
+import type { ContextMode, DetailMode, ProjectWorkflowConfig, WorkflowContextSummary, WorkflowNextInput, WorkflowNextOutput, WorkflowOmittedArtifact, WorkflowResultMeta } from "../types.ts";
 import { readConfig } from "./config.ts";
 import { listRootTasks, tryReadTask, type WorkflowTaskJson } from "./task.ts";
 import { resolveInsideRoot } from "../safety/pathPolicy.ts";
@@ -11,15 +11,19 @@ import { readWorkflowTelemetrySummary, writeWorkflowTelemetry } from "./telemetr
 import { buildAdaptiveControl, compactAdaptiveControl } from "./adaptive.ts";
 import { isGrillFinalized } from "./grill.ts";
 import { readGitPorcelain } from "./gitPorcelain.ts";
+import { retrieveWorkflowMemoryForNext } from "./rag/retrieval.ts";
 
 export async function workflowNext(root: string, input: WorkflowNextInput = {}): Promise<WorkflowNextOutput> {
   const startedAt = Date.now();
   const config = await readConfig(root);
   const hasWorkflow = existsSync(resolveInsideRoot(root, ".workflow"));
-  const includeContext = input.includeContext ?? "lite";
-  const allTasks = hasWorkflow ? await listRootTasks(root) : [];
+  const includeContext = input.includeContext ?? configuredDefaultContextMode(config?.context?.defaultMode);
+  // When a task is explicitly requested, do not scan all root tasks. The requested
+  // task either routes directly or returns task_not_found, and taskCandidates are
+  // only attached for implicit active-task discovery.
+  const allTasks = hasWorkflow && !input.task ? await listRootTasks(root) : [];
   const requestedTask = hasWorkflow && input.task ? await tryReadTask(root, input.task) : null;
-  const activeTask = requestedTask ?? selectActiveTask(allTasks);
+  const activeTask = requestedTask ?? (!input.task ? selectActiveTask(allTasks) : null);
   let output: WorkflowNextOutput;
 
   if (!hasWorkflow) {
@@ -55,7 +59,7 @@ export async function workflowNext(root: string, input: WorkflowNextInput = {}):
       cache: { stableKey: "workflow-next:v2:no-task", cacheFriendly: true, hit: false },
     }, startedAt);
   } else {
-    output = finalizeNext(await routeForTask(root, config?.project.profile ?? "generic", activeTask, input), startedAt);
+    output = finalizeNext(await routeForTask(root, config?.project.profile ?? "generic", activeTask, { ...input, includeContext }, config), startedAt);
   }
 
   if (hasWorkflow && !input.task) output = attachTaskCandidates(output, allTasks);
@@ -63,15 +67,16 @@ export async function workflowNext(root: string, input: WorkflowNextInput = {}):
   return output;
 }
 
-async function routeForTask(root: string, profile: string, task: WorkflowTaskJson, input: WorkflowNextInput): Promise<WorkflowNextOutput> {
+async function routeForTask(root: string, profile: string, task: WorkflowTaskJson, input: WorkflowNextInput, config: ProjectWorkflowConfig | null): Promise<WorkflowNextOutput> {
   const includeContext = input.includeContext ?? "lite";
   const next = nextActionForTask(task, input.agent);
+  const ragEnabled = config?.rag?.enabled === true;
   // Fetch `git status --porcelain` once per call — both the cache key fingerprint
   // and the workspace summary inside the context bundle need it. Without this share
   // a cache-miss path would spawn `git` twice (cost ~30–80ms on Windows).
   const needsPorcelain = isWorkflowNextCacheable(includeContext, input.detail) || includeContext !== "none";
   const porcelain = needsPorcelain ? await readGitPorcelain(root) : undefined;
-  const workflowCacheKey = isWorkflowNextCacheable(includeContext, input.detail)
+  const workflowCacheKey = !ragEnabled && isWorkflowNextCacheable(includeContext, input.detail)
     ? await computeWorkflowNextCacheKey(root, task, { profile, includeContext, detail: input.detail, agent: input.agent }, porcelain)
     : undefined;
   if (workflowCacheKey) {
@@ -84,6 +89,9 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   const includeDecisionCards = input.detail === "normal" || input.detail === "full";
   const adaptiveControl = bundle ? compactAdaptiveControl(buildAdaptiveControl({ bundle, nextAction: next.nextAction, recommendedTool: next.recommendedTool, requestedAgent: input.agent }), { signal: includeContext === "signal", lite: includeContext === "lite", includeDecisionCards }) : undefined;
   const context = bundle ? await contextFromBundle(root, bundle, input.detail, adaptiveControl) : undefined;
+  const retrieval = await retrieveWorkflowMemoryForNext(root, config, { task: task.id, agent: input.agent, nextAction: next.nextAction, bundle });
+  const retrievalWarnings = retrieval?.indexState === "missing" ? [{ code: "rag_index_missing", message: "Workflow RAG is enabled but the local lexical index is missing. Run workflow_run action=rag_reindex mode=execute." }] : [];
+  const warnings = [...(bundle?.warnings ?? []), ...telemetrySummary.warnings, ...retrievalWarnings];
   const recommendedTool = adaptiveControl?.strategy === "deterministic_preflight" && adaptiveControl.deterministicActions[0]
     ? adaptiveControl.deterministicActions[0]
     : adaptiveControl?.strategy === "subagent_brief" && adaptiveControl.delegateRecommendedCall ? adaptiveControl.delegateRecommendedCall : next.recommendedTool;
@@ -96,7 +104,7 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     nextAction: next.nextAction,
     recommendedTool,
     blockedBy: shouldInlineBlockers(includeContext, input.detail) ? bundle?.blockedBy ?? [] : [],
-    warnings: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings],
+    warnings,
     context,
     // evidenceRefs / omitted / tokenBudget are canonically embedded inside `context.*`.
     // Top-level mirrors used to duplicate the same payload (~100 tokens / call); they
@@ -104,10 +112,11 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
     // `context.*`. Types remain optional for backward compatibility with old caches.
     adaptiveControl,
     blockedCodes: bundle?.blockedBy.map((blocker) => blocker.code) ?? [],
-    warningCodes: [...(bundle?.warnings ?? []), ...telemetrySummary.warnings].map((warning) => warning.code),
+    warningCodes: warnings.map((warning) => warning.code),
     strategy: adaptiveControl?.strategy,
     recommendedAgent: adaptiveControl?.recommendedAgent,
     detailRef: context?.detailRef,
+    retrieval,
     cache: {
       stableKey: "workflow-next:v2",
       cacheFriendly: true,
@@ -119,6 +128,12 @@ async function routeForTask(root: string, profile: string, task: WorkflowTaskJso
   };
   if (workflowCacheKey) await writeWorkflowNextCache(root, workflowCacheKey, output);
   return output;
+}
+
+const CONTEXT_MODES = new Set<ContextMode>(["none", "signal", "lite", "brief", "task", "check", "finish"]);
+
+function configuredDefaultContextMode(value: unknown): ContextMode {
+  return CONTEXT_MODES.has(value as ContextMode) ? value as ContextMode : "lite";
 }
 
 function selectActiveTask(tasks: WorkflowTaskJson[]): WorkflowTaskJson | null {

@@ -172,7 +172,7 @@ export function buildPrdKernelFromMarkdown(
     mode,
     title,
     task: { id: task.id, status: task.status, stage: task.stage, flowLevel: task.flowLevel },
-    source: { path: relPath, exists: true, confirmationHash: prdConfirmationHash(markdown), ...sourceMeta },
+    source: { path: relPath, exists: true, confirmationHash: prdConfirmationHashFromLines(lines, headings), ...sourceMeta },
     executionContract: { fields: executionFields, raw: sections.executionContract.body },
     goal: sections.goal.body,
     requirements: sections.requirements.body,
@@ -286,7 +286,12 @@ export interface UpdatePrdSectionResult {
 }
 
 export function prdConfirmationHash(markdown: string): string {
-  return createHash("sha256").update(`${stripFinalConfirmationSection(markdown).trim()}\n`).digest("hex").slice(0, 16);
+  const lines = markdown.split(/\r?\n/);
+  return prdConfirmationHashFromLines(lines, collectHeadings(lines));
+}
+
+function prdConfirmationHashFromLines(lines: string[], headings: Heading[]): string {
+  return createHash("sha256").update(`${stripFinalConfirmationSectionFromLines(lines, headings).trim()}\n`).digest("hex").slice(0, 16);
 }
 
 export function updatePrdSection(markdown: string, section: PrdSectionKey, content: string, mode: PrdUpdateMode = "replace"): UpdatePrdSectionResult {
@@ -363,11 +368,9 @@ export function appendPrdDecisionLog(markdown: string, decisions: WorkflowGrillD
   };
 }
 
-function stripFinalConfirmationSection(markdown: string): string {
-  const lines = markdown.split(/\r?\n/);
-  const headings = collectHeadings(lines);
+function stripFinalConfirmationSectionFromLines(lines: string[], headings: Heading[]): string {
   const heading = headings.find((candidate) => SECTION_MATCHERS.finalConfirmation.some((matcher) => matcher.test(candidate.title.trim())));
-  if (!heading) return markdown;
+  if (!heading) return lines.join("\n");
   const nextHeading = headings.find((candidate) => candidate.lineIndex > heading.lineIndex && candidate.level <= heading.level);
   const endLine = nextHeading ? nextHeading.lineIndex : lines.length;
   return [...lines.slice(0, heading.lineIndex), ...lines.slice(endLine)].join("\n");

@@ -89,6 +89,8 @@ test("create task uses defaultFlowLevel and deterministic manifest actions maint
   config.workflow.defaultFlowLevel = "simple";
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   await writeFile(join(root, "src-main.ts"), "export const value = 1;\n", "utf8");
+  await writeFile(join(root, "src-extra.ts"), "export const extra = 2;\n", "utf8");
+  await writeFile(join(root, "check-extra.ts"), "export const checked = true;\n", "utf8");
 
   const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Manifest Actions", slug: "manifest-actions" });
   assert.equal(create.status, "planning");
@@ -96,6 +98,11 @@ test("create task uses defaultFlowLevel and deterministic manifest actions maint
   assert.equal(task.flowLevel, "simple");
   assert.equal(existsSync(join(root, ".workflow/tasks", task.id, "implement.jsonl")), true);
   assert.equal(existsSync(join(root, ".workflow/tasks", task.id, "check.jsonl")), true);
+
+  const batchInit = await workflowRun(root, { action: "init_manifests", mode: "execute", task: task.id, implementEntries: [{ file: "src-extra.ts", reason: "Batch implementation target" }], checkEntries: [{ file: "check-extra.ts", reason: "Batch check target" }] });
+  assert.equal(batchInit.ok, true);
+  assert.match(await readFile(join(root, ".workflow/tasks", task.id, "implement.jsonl"), "utf8"), /src-extra\.ts/);
+  assert.match(await readFile(join(root, ".workflow/tasks", task.id, "check.jsonl"), "utf8"), /check-extra\.ts/);
 
   const upsert = await workflowRun(root, { action: "upsert_manifest_entry", mode: "execute", task: task.id, manifest: "implement", file: "src-main.ts", reason: "Implementation target" });
   assert.equal(upsert.ok, true);
@@ -174,7 +181,7 @@ test("telemetry writer rotates files after the daily JSONL exceeds the size limi
 test("runtime package version follows package.json", () => {
   const pkg = require("../package.json") as { version: string };
   assert.equal(PACKAGE_VERSION, pkg.version);
-  assert.equal(PACKAGE_VERSION, "0.3.0");
+  assert.equal(PACKAGE_VERSION, "0.4.0");
 });
 class MockDelegateSession implements DelegateSession {
   messages: unknown[] = [];
@@ -294,6 +301,23 @@ test("workflow_delegate execute reports budget exceeded", async () => {
   } finally {
     setDelegateSdkForTest(undefined);
   }
+});
+
+test("workflow_next honors config context.defaultMode when includeContext is omitted", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pcw-default-mode-"));
+  await executeInitWorkspace(root, "generic");
+  const create = await workflowRun(root, { action: "create_from_grill", mode: "execute", title: "Default Mode", level: "standard", slug: "default-mode" });
+  const configPath = join(root, ".workflow/config.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.context.defaultMode = "signal";
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const implicit = await workflowNext(root, { task: create.task });
+  assert.equal(implicit.context?.mode, "signal");
+  assert.ok(implicit.detailRef?.includes(".workflow/.runtime/context/"));
+
+  const explicit = await workflowNext(root, { task: create.task, includeContext: "lite" });
+  assert.equal(explicit.context?.mode, "lite");
 });
 
 test("workflow_next signal mode returns compact routing fields and a detail ref", async () => {

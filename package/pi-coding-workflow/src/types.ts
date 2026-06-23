@@ -39,6 +39,55 @@ export interface WorkflowTokenBudget {
   omittedRefs?: string[];
 }
 
+export type WorkflowRagMode = "lexical" | "embedding" | "hybrid";
+export type WorkflowRagAutoIndex = "off" | "manual" | "lazy" | "on_write";
+export type WorkflowRagSource = "spec" | "activeTask" | "historicalTasks" | "tasks" | "runtimeSummaries" | "manifestFiles" | "code";
+
+export interface WorkflowRagConfig {
+  enabled: boolean;
+  mode: WorkflowRagMode;
+  autoIndex?: WorkflowRagAutoIndex;
+  sources?: {
+    spec?: boolean;
+    activeTask?: boolean;
+    historicalTasks?: boolean;
+    runtimeSummaries?: boolean;
+    manifestFiles?: boolean;
+    code?: boolean;
+  };
+  retrieval?: {
+    topK?: number;
+    maxReturnedRefs?: number;
+    maxPreviewChars?: number;
+    minScore?: number;
+    writeQueryArtifact?: boolean;
+  };
+  privacy?: {
+    allowRemoteContent?: boolean;
+    redactSecrets?: boolean;
+    excludeGlobs?: string[];
+  };
+}
+
+export interface WorkflowRagHitCompact {
+  ref: string;
+  kind: string;
+  path?: string;
+  score: number;
+  reason: string;
+  preview?: string;
+}
+
+export interface WorkflowRetrievalSummary {
+  enabled: boolean;
+  mode: WorkflowRagMode;
+  indexState: "disabled" | "missing" | "fresh";
+  queryRef?: string;
+  topRefs: WorkflowRagHitCompact[];
+  omitted?: WorkflowOmittedArtifact[];
+  tokenBudget?: WorkflowTokenBudget;
+}
+
 export interface WorkflowResultMeta {
   estimatedTokens: number;
   targetTokens?: number;
@@ -145,6 +194,7 @@ export interface WorkflowNextOutput {
   omitted?: WorkflowOmittedArtifact[];
   tokenBudget?: WorkflowTokenBudget;
   adaptiveControl?: WorkflowAdaptiveControl;
+  retrieval?: WorkflowRetrievalSummary;
   cache?: { stableKey?: string; taskKey?: string; dynamicKey?: string; cacheKey?: string; cacheFriendly: boolean; hit?: boolean };
   artifactRef?: string;
   meta?: WorkflowResultMeta;
@@ -200,7 +250,7 @@ export interface WorkflowGrillState {
   finalizedAt?: string;
 }
 
-export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "record_round_and_update_prd" | "append_prd_decisions" | "update_prd_section" | "init_manifests" | "upsert_manifest_entry" | "remove_manifest_entry" | "sync_manifest_from_diff" | "list_tasks" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "reopen" | "batch";
+export type WorkflowRunAction = "create_from_grill" | "create_child" | "record_grill_decision" | "record_round_and_update_prd" | "append_prd_decisions" | "update_prd_section" | "init_manifests" | "upsert_manifest_entry" | "remove_manifest_entry" | "sync_manifest_from_diff" | "list_tasks" | "rag_status" | "rag_reindex" | "finalize_grill" | "start_checked" | "checkpoint" | "finish_run" | "archive" | "reopen" | "batch";
 export type WorkflowRunSingleAction = Exclude<WorkflowRunAction, "batch">;
 export type WorkflowPrdUpdateMode = "replace" | "append";
 
@@ -269,6 +319,8 @@ export interface WorkflowRunBatchItem {
   taskStatus?: WorkflowStatus | "active" | "all";
   limit?: number;
   includeArchived?: boolean;
+  sources?: WorkflowRagSource[];
+  changedOnly?: boolean;
 }
 
 export interface WorkflowRunInput {
@@ -311,6 +363,8 @@ export interface WorkflowRunInput {
   taskStatus?: WorkflowStatus | "active" | "all";
   limit?: number;
   includeArchived?: boolean;
+  sources?: WorkflowRagSource[];
+  changedOnly?: boolean;
   /** Internal evidence captured by workflow_run before recording a decision. */
   prdHashBefore?: string;
   /** Internal evidence captured by workflow_run before recording a decision. */
@@ -430,6 +484,7 @@ export interface ProjectWorkflowConfig {
   context: { defaultMode: "lite" | "brief" | "none" | "signal" | "task" | "check" | "finish"; maxSummaryChars: number; artifactMode: "summary-first" };
   git: { autoCommit: boolean; autoPush: boolean; pushConfirmation: "never" | "risky" | "always"; protectedBranches: string[]; allowBroadStage: false };
   profiles: { enabled: ProfileName[] };
+  rag?: WorkflowRagConfig;
 }
 
 export interface ScanSignal { type: string; path: string; profile?: ProfileName; weight?: number; message?: string }
